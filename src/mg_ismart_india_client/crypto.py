@@ -51,10 +51,9 @@ def gateway_signature(
 
 
 def hash_control_pin(pin: str) -> str:
-    if not re.fullmatch(r"\d{4,8}", pin or ""):
-        raise MgIndiaApiError("Control PIN must be 4 to 8 digits")
-    normalized = pin if len(pin) == 6 else f"{pin}00"
-    return md5_hex(normalized).upper()
+    if not re.fullmatch(r"\d{4}", pin or ""):
+        raise MgIndiaApiError("Control PIN must be exactly 4 digits")
+    return md5_hex(f"{pin}00").upper()
 
 
 def decrypt_gateway_body(encrypted: str, headers: Any) -> str:
