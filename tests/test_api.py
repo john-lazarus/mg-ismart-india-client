@@ -1,8 +1,15 @@
+import random
+
+import pytest
+
+from mg_ismart_india_client.bitcodec import PackedBitWriter
 from mg_ismart_india_client.client import (
+    decode_login_response,
     discover_capabilities,
     parse_status,
 )
 from mg_ismart_india_client.crypto import (
+    MgIndiaApiError,
     gateway_signature,
     hash_control_pin,
     normalize_phone,
@@ -40,6 +47,37 @@ def test_status_parser():
         }
     )
     assert s.locked is True and s.fuel_level == 50 and s.aux_battery_voltage == 14
+
+
+def test_decode_login_response_raises_clean_error_on_rejection():
+    # A real MG India rejection response declares a dispatcher_len of only
+    # ~6 bytes (vs. the ~86 a successful login carries), which used to
+    # crash read_fixed_7bit with IndexError. Reproduce that shape with
+    # random bytes rather than a captured server payload.
+    rng = random.Random(1234)
+    payload = bytearray(rng.randbytes(20))
+    payload[2], payload[3] = 6, 0  # dispatcher_len = 6, too short to hold a uid
+    raw = "00001" + bytes(payload).hex().upper()
+
+    with pytest.raises(MgIndiaApiError, match="rejected"):
+        decode_login_response(raw)
+
+
+def test_decode_login_response_round_trip_on_success_shape():
+    dispatcher = bytearray(50)
+    dispatcher[2], dispatcher[3] = 50, 0  # dispatcher_len = 50, little-endian
+
+    writer = PackedBitWriter()
+    writer.write(0, 6)
+    writer.write_string("T" * 40, 40, 40)
+    writer.write_string("T" * 40, 40, 40)
+
+    payload = bytes(dispatcher) + writer.bytes()
+    raw = "00001" + payload.hex().upper()
+
+    uid, token = decode_login_response(raw)
+    assert token == "T" * 40
+    assert len(uid) == 50
 
 
 def test_capabilities_and_encoders():

@@ -231,6 +231,15 @@ def decode_login_response(raw: str) -> tuple[str, str]:
     dispatcher_len = payload[2] + (payload[3] << 8)
     dispatcher = payload[:dispatcher_len]
     app = payload[dispatcher_len:]
+    # A successful login's dispatcher carries the uid at bit offset 300..397
+    # (50 bytes minimum). The server sends a much shorter dispatcher when it
+    # rejects the login (bad phone/password or unauthorized account), which
+    # would otherwise crash read_fixed_7bit with an IndexError.
+    if len(dispatcher) < 50:
+        raise MgIndiaApiError(
+            "Login rejected by MG India server (check phone/password, or the "
+            "account may not be authorized for this app)"
+        )
     uid = read_fixed_7bit(dispatcher, 300, 14).rjust(50, "0")
     reader = PackedBitReader(app)
     reader.read(6)
