@@ -25,6 +25,7 @@ from .crypto import (
 )
 from .models import Capabilities, Snapshot, Status, Vehicle
 from .tap import (
+    codec11,
     decode_control_response,
     decode_pin_response,
     decode_status_response,
@@ -222,20 +223,45 @@ def encode_login_app(password: str, device_id: str) -> bytes:
     return writer.bytes()
 
 
+def login_error_from_response(payload: bytes) -> MgIndiaApiError | None:
+    """Return the server's rejection as an error, or None if not a failure.
+
+    A failed login comes back as a V11 dispatcher (protocol id 0x11) carrying a
+    non-zero ``result`` and a human-readable ``errorMessage`` such as
+    "Incorrect password. You may have another 2 attempts of the day". Decoding
+    it lets the caller surface that reason instead of blindly parsing a success
+    layout and crashing on the (absent) token payload.
+    """
+    try:
+        dispatcher = codec11().decode("MPDispatcherBodyV11", payload[4:])
+    except Exception:
+        return None
+    result = dispatcher.get("result")
+    if not result:  # 0 or absent -> not an error, let the success path run
+        return None
+    message = dispatcher.get("errorMessage")
+    if isinstance(message, (bytes, bytearray)):
+        message = message.decode("utf-8", "replace").strip()
+    detail = message or f"result {result}"
+    return MgIndiaApiError(f"MG India login rejected: {detail}")
+
+
 def decode_login_response(raw: str) -> tuple[str, str]:
     if len(raw) < 5 or raw[4] != "1":
         raise MgIndiaApiError("Unexpected TAP login response framing")
     payload = bytes.fromhex(raw[5:])
     if len(payload) < 4:
         raise MgIndiaApiError("TAP login response is too short")
+    # Surface a server-side rejection (bad password, unauthorized account,
+    # daily attempt limit) with its real message before attempting to parse a
+    # success layout that isn't there.
+    error = login_error_from_response(payload)
+    if error is not None:
+        raise error
     dispatcher_len = payload[2] + (payload[3] << 8)
     dispatcher = payload[:dispatcher_len]
     app = payload[dispatcher_len:]
-    # A successful login's dispatcher carries the uid at bit offset 300..397
-    # (50 bytes minimum). The server sends a much shorter dispatcher when it
-    # rejects the login (bad phone/password or unauthorized account), which
-    # would otherwise crash read_fixed_7bit with an IndexError.
-    if len(dispatcher) < 50:
+    if len(dispatcher) < 50 or len(app) < 11:
         raise MgIndiaApiError(
             "Login rejected by MG India server (check phone/password, or the "
             "account may not be authorized for this app)"

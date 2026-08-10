@@ -16,10 +16,19 @@ from mg_ismart_india_client.crypto import (
     tap_signature,
 )
 from mg_ismart_india_client.tap import (
+    codec11,
     encode_control_request,
     encode_pin_request,
     encode_status_request,
 )
+
+
+def _v11_login_frame(fields: dict) -> str:
+    """Build a TAP login response the way decode_login_response reads it:
+    a V11 dispatcher body prefixed with the 4-byte framing header."""
+    body = codec11().encode("MPDispatcherBodyV11", fields)
+    payload = bytes((17, 0, len(body) + 4, 0)) + body
+    return "00001" + payload.hex().upper()
 
 
 def test_phone_and_pin():
@@ -49,17 +58,35 @@ def test_status_parser():
     assert s.locked is True and s.fuel_level == 50 and s.aux_battery_voltage == 14
 
 
-def test_decode_login_response_raises_clean_error_on_rejection():
-    # A real MG India rejection response declares a dispatcher_len of only
-    # ~6 bytes (vs. the ~86 a successful login carries), which used to
-    # crash read_fixed_7bit with IndexError. Reproduce that shape with
-    # random bytes rather than a captured server payload.
+def test_decode_login_response_surfaces_server_error_message():
+    # A real rejection is a V11 dispatcher with a non-zero result and a
+    # human-readable errorMessage. decode_login_response used to crash on it;
+    # it must now raise MgIndiaApiError carrying the server's message.
+    raw = _v11_login_frame(
+        {
+            "applicationID": "501",
+            "eventCreationTime": 1,
+            "messageID": 1,
+            "iccID": "12345678901234567890",
+            "applicationDataLength": 0,
+            "applicationDataProtocolVersion": 513,
+            "result": 15030,
+            "errorMessage": b"Incorrect password. You may have another 2 attempts",
+        }
+    )
+    with pytest.raises(MgIndiaApiError, match="Incorrect password"):
+        decode_login_response(raw)
+
+
+def test_decode_login_response_raises_clean_error_on_short_dispatcher():
+    # A malformed/short response that is not a V11 error dispatcher must still
+    # raise a clean MgIndiaApiError instead of crashing with IndexError.
     rng = random.Random(1234)
     payload = bytearray(rng.randbytes(20))
     payload[2], payload[3] = 6, 0  # dispatcher_len = 6, too short to hold a uid
     raw = "00001" + bytes(payload).hex().upper()
 
-    with pytest.raises(MgIndiaApiError, match="rejected"):
+    with pytest.raises(MgIndiaApiError):
         decode_login_response(raw)
 
 
