@@ -215,6 +215,11 @@ def discover_capabilities(payloads: list[dict[str, Any]]) -> Capabilities:
     )
 
 
+class MgIndiaLoginRejected(MgIndiaApiError):
+    """Definitive server verdict on a login (bad password, unregistered number,
+    daily attempt limit). Terminal - retrying only wastes daily attempts."""
+
+
 def encode_login_app(password: str, device_id: str) -> bytes:
     writer = PackedBitWriter()
     writer.write(1, 1)
@@ -243,7 +248,7 @@ def login_error_from_response(payload: bytes) -> MgIndiaApiError | None:
     if isinstance(message, (bytes, bytearray)):
         message = message.decode("utf-8", "replace").strip()
     detail = message or f"result {result}"
-    return MgIndiaApiError(f"MG India login rejected: {detail}")
+    return MgIndiaLoginRejected(f"MG India login rejected: {detail}")
 
 
 def decode_login_response(raw: str) -> tuple[str, str]:
@@ -341,6 +346,11 @@ class MgIndiaClient:
                     try:
                         self.uid, self.token = decode_login_response(text)
                         return
+                    except MgIndiaLoginRejected:
+                        # Server gave a definitive verdict (bad password,
+                        # unregistered, daily-limit). Each POST counts against
+                        # the daily attempt quota - do NOT retry, surface it now.
+                        raise
                     except (MgIndiaApiError, ValueError) as err:
                         last_error = err
             if attempt < LOGIN_ATTEMPTS - 1:
