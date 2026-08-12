@@ -220,10 +220,18 @@ class MgIndiaLoginRejected(MgIndiaApiError):
     daily attempt limit). Terminal - retrying only wastes daily attempts."""
 
 
+# The MG iSMART India app caps the login password at 16 characters (its input
+# field has maxLength=16), so only the first 16 chars ever authenticate. A user
+# may type or store a longer password (e.g. one from a password manager), but
+# the app silently trims it; sending the full value makes the server reject it
+# as "incorrect password". Trim here to match the app.
+PASSWORD_MAX_LEN = 16
+
+
 def encode_login_app(password: str, device_id: str) -> bytes:
     writer = PackedBitWriter()
     writer.write(1, 1)
-    writer.write_string(password, 6, 30)
+    writer.write_string(password[:PASSWORD_MAX_LEN], 6, 30)
     writer.write_string(device_id, 1, 200)
     return writer.bytes()
 
