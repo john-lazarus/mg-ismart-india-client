@@ -6,6 +6,7 @@ from mg_ismart_india_client.bitcodec import PackedBitWriter
 from mg_ismart_india_client.client import (
     decode_login_response,
     discover_capabilities,
+    encode_login_app,
     parse_status,
 )
 from mg_ismart_india_client.crypto import (
@@ -105,6 +106,18 @@ def test_decode_login_response_round_trip_on_success_shape():
     uid, token = decode_login_response(raw)
     assert token == "T" * 40
     assert len(uid) == 50
+
+
+def test_encode_login_app_trims_password_to_app_cap():
+    # The MG iSMART India app input field caps the password at 16 chars, so a
+    # longer password must encode identically to its first 16 characters.
+    long_password = "0123456789ABCDEF" + "extra-that-app-would-never-see"
+    assert len(long_password) > 16
+
+    device_id = "device-1"
+    assert encode_login_app(long_password, device_id) == encode_login_app(
+        long_password[:16], device_id
+    )
 
 
 def test_capabilities_and_encoders():
