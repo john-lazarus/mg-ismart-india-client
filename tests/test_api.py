@@ -1,18 +1,35 @@
+import random
+
+import pytest
+
+from mg_ismart_india_client.bitcodec import PackedBitWriter
 from mg_ismart_india_client.client import (
+    decode_login_response,
     discover_capabilities,
+    encode_login_app,
     parse_status,
 )
 from mg_ismart_india_client.crypto import (
+    MgIndiaApiError,
     gateway_signature,
     hash_control_pin,
     normalize_phone,
     tap_signature,
 )
 from mg_ismart_india_client.tap import (
+    codec11,
     encode_control_request,
     encode_pin_request,
     encode_status_request,
 )
+
+
+def _v11_login_frame(fields: dict) -> str:
+    """Build a TAP login response the way decode_login_response reads it:
+    a V11 dispatcher body prefixed with the 4-byte framing header."""
+    body = codec11().encode("MPDispatcherBodyV11", fields)
+    payload = bytes((17, 0, len(body) + 4, 0)) + body
+    return "00001" + payload.hex().upper()
 
 
 def test_phone_and_pin():
@@ -40,6 +57,67 @@ def test_status_parser():
         }
     )
     assert s.locked is True and s.fuel_level == 50 and s.aux_battery_voltage == 14
+
+
+def test_decode_login_response_surfaces_server_error_message():
+    # A real rejection is a V11 dispatcher with a non-zero result and a
+    # human-readable errorMessage. decode_login_response used to crash on it;
+    # it must now raise MgIndiaApiError carrying the server's message.
+    raw = _v11_login_frame(
+        {
+            "applicationID": "501",
+            "eventCreationTime": 1,
+            "messageID": 1,
+            "iccID": "12345678901234567890",
+            "applicationDataLength": 0,
+            "applicationDataProtocolVersion": 513,
+            "result": 15030,
+            "errorMessage": b"Incorrect password. You may have another 2 attempts",
+        }
+    )
+    with pytest.raises(MgIndiaApiError, match="Incorrect password"):
+        decode_login_response(raw)
+
+
+def test_decode_login_response_raises_clean_error_on_short_dispatcher():
+    # A malformed/short response that is not a V11 error dispatcher must still
+    # raise a clean MgIndiaApiError instead of crashing with IndexError.
+    rng = random.Random(1234)
+    payload = bytearray(rng.randbytes(20))
+    payload[2], payload[3] = 6, 0  # dispatcher_len = 6, too short to hold a uid
+    raw = "00001" + bytes(payload).hex().upper()
+
+    with pytest.raises(MgIndiaApiError):
+        decode_login_response(raw)
+
+
+def test_decode_login_response_round_trip_on_success_shape():
+    dispatcher = bytearray(50)
+    dispatcher[2], dispatcher[3] = 50, 0  # dispatcher_len = 50, little-endian
+
+    writer = PackedBitWriter()
+    writer.write(0, 6)
+    writer.write_string("T" * 40, 40, 40)
+    writer.write_string("T" * 40, 40, 40)
+
+    payload = bytes(dispatcher) + writer.bytes()
+    raw = "00001" + payload.hex().upper()
+
+    uid, token = decode_login_response(raw)
+    assert token == "T" * 40
+    assert len(uid) == 50
+
+
+def test_encode_login_app_trims_password_to_app_cap():
+    # The MG iSMART India app input field caps the password at 16 chars, so a
+    # longer password must encode identically to its first 16 characters.
+    long_password = "0123456789ABCDEF" + "extra-that-app-would-never-see"
+    assert len(long_password) > 16
+
+    device_id = "device-1"
+    assert encode_login_app(long_password, device_id) == encode_login_app(
+        long_password[:16], device_id
+    )
 
 
 def test_capabilities_and_encoders():

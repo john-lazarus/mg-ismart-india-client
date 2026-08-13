@@ -25,6 +25,7 @@ from .crypto import (
 )
 from .models import Capabilities, Snapshot, Status, Vehicle
 from .tap import (
+    codec11,
     decode_control_response,
     decode_pin_response,
     decode_status_response,
@@ -214,12 +215,48 @@ def discover_capabilities(payloads: list[dict[str, Any]]) -> Capabilities:
     )
 
 
+class MgIndiaLoginRejected(MgIndiaApiError):
+    """Definitive server verdict on a login (bad password, unregistered number,
+    daily attempt limit). Terminal - retrying only wastes daily attempts."""
+
+
+# The MG iSMART India app caps the login password at 16 characters (its input
+# field has maxLength=16), so only the first 16 chars ever authenticate. A user
+# may type or store a longer password (e.g. one from a password manager), but
+# the app silently trims it; sending the full value makes the server reject it
+# as "incorrect password". Trim here to match the app.
+PASSWORD_MAX_LEN = 16
+
+
 def encode_login_app(password: str, device_id: str) -> bytes:
     writer = PackedBitWriter()
     writer.write(1, 1)
-    writer.write_string(password, 6, 30)
+    writer.write_string(password[:PASSWORD_MAX_LEN], 6, 30)
     writer.write_string(device_id, 1, 200)
     return writer.bytes()
+
+
+def login_error_from_response(payload: bytes) -> MgIndiaApiError | None:
+    """Return the server's rejection as an error, or None if not a failure.
+
+    A failed login comes back as a V11 dispatcher (protocol id 0x11) carrying a
+    non-zero ``result`` and a human-readable ``errorMessage`` such as
+    "Incorrect password. You may have another 2 attempts of the day". Decoding
+    it lets the caller surface that reason instead of blindly parsing a success
+    layout and crashing on the (absent) token payload.
+    """
+    try:
+        dispatcher = codec11().decode("MPDispatcherBodyV11", payload[4:])
+    except Exception:
+        return None
+    result = dispatcher.get("result")
+    if not result:  # 0 or absent -> not an error, let the success path run
+        return None
+    message = dispatcher.get("errorMessage")
+    if isinstance(message, (bytes, bytearray)):
+        message = message.decode("utf-8", "replace").strip()
+    detail = message or f"result {result}"
+    return MgIndiaLoginRejected(f"MG India login rejected: {detail}")
 
 
 def decode_login_response(raw: str) -> tuple[str, str]:
@@ -228,9 +265,20 @@ def decode_login_response(raw: str) -> tuple[str, str]:
     payload = bytes.fromhex(raw[5:])
     if len(payload) < 4:
         raise MgIndiaApiError("TAP login response is too short")
+    # Surface a server-side rejection (bad password, unauthorized account,
+    # daily attempt limit) with its real message before attempting to parse a
+    # success layout that isn't there.
+    error = login_error_from_response(payload)
+    if error is not None:
+        raise error
     dispatcher_len = payload[2] + (payload[3] << 8)
     dispatcher = payload[:dispatcher_len]
     app = payload[dispatcher_len:]
+    if len(dispatcher) < 50 or len(app) < 11:
+        raise MgIndiaApiError(
+            "Login rejected by MG India server (check phone/password, or the "
+            "account may not be authorized for this app)"
+        )
     uid = read_fixed_7bit(dispatcher, 300, 14).rjust(50, "0")
     reader = PackedBitReader(app)
     reader.read(6)
@@ -306,6 +354,11 @@ class MgIndiaClient:
                     try:
                         self.uid, self.token = decode_login_response(text)
                         return
+                    except MgIndiaLoginRejected:
+                        # Server gave a definitive verdict (bad password,
+                        # unregistered, daily-limit). Each POST counts against
+                        # the daily attempt quota - do NOT retry, surface it now.
+                        raise
                     except (MgIndiaApiError, ValueError) as err:
                         last_error = err
             if attempt < LOGIN_ATTEMPTS - 1:
