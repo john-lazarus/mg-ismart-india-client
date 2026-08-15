@@ -59,6 +59,40 @@ def test_status_parser():
     assert s.locked is True and s.fuel_level == 50 and s.aux_battery_voltage == 14
 
 
+def test_tyre_pressure_parser():
+    # Raw values from a captured frame; the app showed 33.8 / 35.4 psi for
+    # the 169 / 177 readings at the same time.
+    s = parse_status(
+        {
+            "statusTime": 1,
+            "basicVehicleStatus": {
+                "frontRrightTyrePressure": 179,
+                "frontLeftTyrePressure": 169,
+                "rearRightTyrePressure": 177,
+                "rearLeftTyrePressure": 169,
+                "wheelTyreMonitorStatus": 0,
+            },
+        }
+    )
+    assert s.front_left_tyre_psi == 33.8
+    assert s.front_right_tyre_psi == 35.8
+    assert s.rear_left_tyre_psi == 33.8
+    assert s.rear_right_tyre_psi == 35.4
+    assert s.tyre_monitor_status == 0
+
+
+def test_tyre_pressure_accepts_corrected_front_right_spelling():
+    s = parse_status({"basicVehicleStatus": {"frontRightTyrePressure": 175}})
+    assert s.front_right_tyre_psi == 35.0
+
+
+def test_tyre_pressure_absent_or_zero_is_none():
+    s = parse_status({"basicVehicleStatus": {"frontLeftTyrePressure": 0}})
+    assert s.front_left_tyre_psi is None
+    assert s.front_right_tyre_psi is None
+    assert s.tyre_monitor_status is None
+
+
 def test_decode_login_response_surfaces_server_error_message():
     # A real rejection is a V11 dispatcher with a non-zero result and a
     # human-readable errorMessage. decode_login_response used to crash on it;
