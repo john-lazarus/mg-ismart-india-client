@@ -1,7 +1,45 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from enum import IntEnum
 from typing import Any
+
+
+class GpsStatus(IntEnum):
+    """Quality of the vehicle's last GPS fix (ASN.1 ``GPSStatus``)."""
+
+    NO_SIGNAL = 0
+    TIME_FIX = 1
+    FIX_2D = 2
+    FIX_3D = 3
+
+
+@dataclass(slots=True)
+class GpsPosition:
+    """A decoded ``RvsPosition``, in ordinary units.
+
+    Latitude and longitude are degrees (the protocol carries micro-degrees) and
+    altitude is metres. Speed is
+    km/h from the protocol's tenths.
+    ``hdop`` is left in raw protocol units because the scale the
+    vehicle uses is not confirmed either.
+    """
+
+    latitude: float | None = None
+    longitude: float | None = None
+    altitude_m: int | None = None
+    heading_deg: int | None = None
+    speed_kmh: float | None = None
+    hdop: int | None = None
+    satellites: int | None = None
+    gps_status: GpsStatus | None = None
+    position_time: int | None = None
+    raw: dict[str, Any] = field(default_factory=dict)
+
+    @property
+    def has_fix(self) -> bool:
+        """True when the vehicle reported a usable 2D or 3D fix."""
+        return self.gps_status in (GpsStatus.FIX_2D, GpsStatus.FIX_3D)
 
 
 @dataclass(slots=True)
@@ -50,6 +88,7 @@ class Status:
     can_bus_active: bool | None = None
     last_can_activity: int | None = None
     handbrake: bool | None = None
+    gps: GpsPosition | None = None
     raw: dict[str, Any] = field(default_factory=dict)
 
 

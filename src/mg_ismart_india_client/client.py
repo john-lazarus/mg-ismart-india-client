@@ -23,7 +23,14 @@ from .crypto import (
     normalize_phone,
     tap_signature,
 )
-from .models import Capabilities, Snapshot, Status, Vehicle
+from .models import (
+    Capabilities,
+    GpsPosition,
+    GpsStatus,
+    Snapshot,
+    Status,
+    Vehicle,
+)
 from .tap import (
     codec11,
     decode_control_response,
@@ -87,6 +94,58 @@ def _int(v: Any, minv: int | None = None, maxv: int | None = None) -> int | None
 def _tenths(v: Any) -> float | None:
     i = _int(v)
     return None if i is None else i / 10
+
+
+# asn1tools decodes an ENUMERATED to its identifier, so gpsStatus arrives as
+# one of these strings rather than the underlying number.
+_GPS_STATUS_NAMES = {
+    "noGpsSignal": GpsStatus.NO_SIGNAL,
+    "timeFix": GpsStatus.TIME_FIX,
+    "fix2D": GpsStatus.FIX_2D,
+    "fix3D": GpsStatus.FIX_3D,
+}
+
+
+def _gps_status(v: Any) -> GpsStatus | None:
+    if isinstance(v, str):
+        return _GPS_STATUS_NAMES.get(v)
+    i = _int(v, 0, 3)
+    return None if i is None else GpsStatus(i)
+
+
+def _micro_degrees(v: Any, limit: int) -> float | None:
+    i = _int(v, -limit, limit)
+    return None if i is None else i / 1e6
+
+
+def parse_gps_position(raw: Any) -> GpsPosition | None:
+    """Decode an ``RvsPosition`` payload into ordinary units.
+
+    Returns None when the response carried no position block at all. A block
+    that is present but holds no fix is still returned, so callers can tell
+    "the vehicle says it cannot see the sky" apart from "the vehicle said
+    nothing", and can read ``gps_status``/``has_fix`` to decide what to do.
+    """
+    if not isinstance(raw, dict):
+        return None
+    way_point = raw.get("wayPoint")
+    way_point = way_point if isinstance(way_point, dict) else {}
+    position = way_point.get("position")
+    position = position if isinstance(position, dict) else {}
+    timestamp = raw.get("timestamp4Short")
+    seconds = timestamp.get("seconds") if isinstance(timestamp, dict) else timestamp
+    return GpsPosition(
+        latitude=_micro_degrees(position.get("latitude"), 90_000_000),
+        longitude=_micro_degrees(position.get("longitude"), 180_000_000),
+        altitude_m=_int(position.get("altitude"), -100, 8900),
+        heading_deg=_int(way_point.get("heading"), 0, 359),
+        speed_kmh=_tenths(_int(way_point.get("speed"), -999, 4500)),
+        hdop=_int(way_point.get("hdop"), 0, 1000),
+        satellites=_int(way_point.get("satellites"), 0, 16),
+        gps_status=_gps_status(raw.get("gpsStatus")),
+        position_time=_int(seconds),
+        raw=raw,
+    )
 
 
 def parse_vehicle(raw: dict[str, Any]) -> Vehicle:
@@ -169,6 +228,7 @@ def parse_status(raw: dict[str, Any]) -> Status:
         can_bus_active=_bool(basic.get("canBusActive")),
         last_can_activity=_int(basic.get("timeOfLastCANBUSActivity")),
         handbrake=_bool(basic.get("handBrake")),
+        gps=parse_gps_position(raw.get("gpsPosition")),
         raw=raw,
     )
 
