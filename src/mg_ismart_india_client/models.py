@@ -47,6 +47,11 @@ class Status:
     range_km: int | None = None
     odometer_km: int | None = None
     aux_battery_voltage: float | None = None
+    front_left_tyre_psi: float | None = None
+    front_right_tyre_psi: float | None = None
+    rear_left_tyre_psi: float | None = None
+    rear_right_tyre_psi: float | None = None
+    tyre_monitor_status: int | None = None
     can_bus_active: bool | None = None
     last_can_activity: int | None = None
     handbrake: bool | None = None
