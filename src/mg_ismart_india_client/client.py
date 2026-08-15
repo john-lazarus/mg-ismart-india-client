@@ -51,6 +51,7 @@ LOGIN_ATTEMPTS = 3
 LOGIN_DELAY = 1.5
 STATUS_ATTEMPTS = 10
 STATUS_DELAY = 1.5
+TYRE_PSI_PER_UNIT = 0.2
 LOGIN_DISPATCHER_TEMPLATE_HEX = (
     "11005600882c60c183060c183060c183060c183060c183060c183060c183060c183060c183"
     "060c183060c183060c183060c1ab06200000000020200468acf134468acf1342468acf134"
@@ -94,6 +95,13 @@ def _int(v: Any, minv: int | None = None, maxv: int | None = None) -> int | None
 def _tenths(v: Any) -> float | None:
     i = _int(v)
     return None if i is None else i / 10
+
+
+def _tyre_psi(v: Any) -> float | None:
+    # Scale derived from captured frames checked against the MG India app's
+    # own readout: raw 169 -> 33.8 psi, 177 -> 35.4 psi, i.e. 0.2 psi/unit.
+    i = _int(v, 1, 255)
+    return None if i is None else round(i * TYRE_PSI_PER_UNIT, 1)
 
 
 # asn1tools decodes an ENUMERATED to its identifier, so gpsStatus arrives as
@@ -225,6 +233,18 @@ def parse_status(raw: dict[str, Any]) -> Status:
         range_km=_tenths(basic.get("fuelRange")),
         odometer_km=_tenths(basic.get("mileage")),
         aux_battery_voltage=_tenths(basic.get("batteryVoltage")),
+        front_left_tyre_psi=_tyre_psi(basic.get("frontLeftTyrePressure")),
+        # "frontRrightTyrePressure" is how the field is spelled in the ASN.1
+        # schema the server encodes with; keep the sane spelling as a fallback
+        # in case it is ever corrected.
+        front_right_tyre_psi=_tyre_psi(
+            basic.get("frontRrightTyrePressure")
+            if basic.get("frontRrightTyrePressure") is not None
+            else basic.get("frontRightTyrePressure")
+        ),
+        rear_left_tyre_psi=_tyre_psi(basic.get("rearLeftTyrePressure")),
+        rear_right_tyre_psi=_tyre_psi(basic.get("rearRightTyrePressure")),
+        tyre_monitor_status=_int(basic.get("wheelTyreMonitorStatus"), 0, 255),
         can_bus_active=_bool(basic.get("canBusActive")),
         last_can_activity=_int(basic.get("timeOfLastCANBUSActivity")),
         handbrake=_bool(basic.get("handBrake")),
