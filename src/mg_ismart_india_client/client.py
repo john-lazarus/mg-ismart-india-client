@@ -104,6 +104,8 @@ def parse_vehicle(raw: dict[str, Any]) -> Vehicle:
         raw.get("brandName"),
         raw.get("modelName") or raw.get("series"),
         str(raw.get("modelYear") or "") or None,
+        raw.get("colorName"),
+        raw.get("series"),
         raw,
     )
 
