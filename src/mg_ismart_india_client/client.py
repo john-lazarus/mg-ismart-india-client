@@ -147,7 +147,7 @@ def parse_gps_position(raw: Any) -> GpsPosition | None:
         longitude=_micro_degrees(position.get("longitude"), 180_000_000),
         altitude_m=_int(position.get("altitude"), -100, 8900),
         heading_deg=_int(way_point.get("heading"), 0, 359),
-        speed_kmh=_tenths(_int(way_point.get("speed"), -999, 4500)),
+        speed_kmh=_tenths(_int(way_point.get("speed"), 0, 4500)),
         hdop=_int(way_point.get("hdop"), 0, 1000),
         satellites=_int(way_point.get("satellites"), 0, 16),
         gps_status=_gps_status(raw.get("gpsStatus")),

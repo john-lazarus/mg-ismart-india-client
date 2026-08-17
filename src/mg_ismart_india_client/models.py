@@ -39,7 +39,11 @@ class GpsPosition:
     @property
     def has_fix(self) -> bool:
         """True when the vehicle reported a usable 2D or 3D fix."""
-        return self.gps_status in (GpsStatus.FIX_2D, GpsStatus.FIX_3D)
+        return (
+            self.gps_status in (GpsStatus.FIX_2D, GpsStatus.FIX_3D)
+            and self.latitude is not None
+            and self.longitude is not None
+        )
 
 
 @dataclass(slots=True)
@@ -93,8 +97,8 @@ class Status:
     can_bus_active: bool | None = None
     last_can_activity: int | None = None
     handbrake: bool | None = None
-    gps: GpsPosition | None = None
     raw: dict[str, Any] = field(default_factory=dict)
+    gps: GpsPosition | None = None
 
 
 @dataclass(slots=True)
