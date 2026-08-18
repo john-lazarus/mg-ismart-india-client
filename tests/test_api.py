@@ -9,6 +9,7 @@ from mg_ismart_india_client.crypto import (
     normalize_phone,
     tap_signature,
 )
+from mg_ismart_india_client.models import Vehicle
 from mg_ismart_india_client.tap import (
     encode_control_request,
     encode_pin_request,
@@ -40,6 +41,12 @@ def test_vehicle_parser_color_and_series():
     assert v.model == "Comet"
     assert v.series == "EC32"
     assert v.color_name == "Nova Blue"
+
+
+def test_vehicle_legacy_positional_arguments():
+    raw = {"vin": "LSJA00000TEST0001"}
+    vehicle = Vehicle("vin", "name", "brand", "model", "2025", raw)
+    assert (vehicle.raw, vehicle.color_name, vehicle.series) == (raw, None, None)
 
 
 def test_status_parser():

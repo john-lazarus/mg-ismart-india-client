@@ -99,14 +99,14 @@ def parse_vehicle(raw: dict[str, Any]) -> Vehicle:
         or str(vin)[-6:]
     )
     return Vehicle(
-        str(vin),
-        str(name),
-        raw.get("brandName"),
-        raw.get("modelName") or raw.get("series"),
-        str(raw.get("modelYear") or "") or None,
-        raw.get("colorName"),
-        raw.get("series"),
-        raw,
+        vin=str(vin),
+        name=str(name),
+        brand=raw.get("brandName"),
+        model=raw.get("modelName") or raw.get("series"),
+        model_year=str(raw.get("modelYear") or "") or None,
+        raw=raw,
+        color_name=raw.get("colorName"),
+        series=raw.get("series"),
     )
 
 

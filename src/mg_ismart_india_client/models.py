@@ -12,11 +12,11 @@ class Vehicle:
     model: str | None = None
     """Human-readable model name, e.g. "Windsor"."""
     model_year: str | None = None
+    raw: dict[str, Any] = field(default_factory=dict)
     color_name: str | None = None
     """Exterior colour as reported by the API, e.g. "Clay Beige"."""
     series: str | None = None
     """Raw API model/series code (e.g. "EQ100"), needed for per-model asset lookups (images, CDN paths). Distinct from :attr:`model`."""
-    raw: dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass(slots=True)
