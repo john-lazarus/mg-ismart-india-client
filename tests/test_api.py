@@ -8,6 +8,7 @@ from mg_ismart_india_client.client import (
     discover_capabilities,
     encode_login_app,
     parse_status,
+    parse_vehicle,
 )
 from mg_ismart_india_client.crypto import (
     MgIndiaApiError,
@@ -16,6 +17,7 @@ from mg_ismart_india_client.crypto import (
     normalize_phone,
     tap_signature,
 )
+from mg_ismart_india_client.models import Vehicle
 from mg_ismart_india_client.tap import (
     codec11,
     encode_control_request,
@@ -40,6 +42,28 @@ def test_phone_and_pin():
 def test_signatures_exist():
     assert len(tap_signature("0123456789ABCDEF")) == 64
     assert len(gateway_signature("/vehicle/userVinList", "1700000000000")) == 64
+
+
+def test_vehicle_parser_color_and_series():
+    v = parse_vehicle(
+        {
+            "vin": "LSJA00000TEST0001",
+            "brandName": "MG",
+            "modelName": "Comet",
+            "series": "EC32",
+            "colorName": "Nova Blue",
+            "modelYear": "2025",
+        }
+    )
+    assert v.model == "Comet"
+    assert v.series == "EC32"
+    assert v.color_name == "Nova Blue"
+
+
+def test_vehicle_legacy_positional_arguments():
+    raw = {"vin": "LSJA00000TEST0001"}
+    vehicle = Vehicle("vin", "name", "brand", "model", "2025", raw)
+    assert (vehicle.raw, vehicle.color_name, vehicle.series) == (raw, None, None)
 
 
 def test_status_parser():
