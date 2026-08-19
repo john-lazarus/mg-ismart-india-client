@@ -112,3 +112,105 @@ class Snapshot:
     capabilities: Capabilities
     status: Status
     user_info: dict[str, Any] = field(default_factory=dict)
+
+
+@dataclass(frozen=True, slots=True)
+class ChargeStatus:
+    """Decoded EV charging status (the app-id 511 charging frame).
+
+    Every field the frame carries is exposed here. Those whose scale is confirmed
+    (against captured frames spanning roughly 4-18 A charge current and 45-100%
+    SOC) are given in real units and named for that unit; those still unconfirmed
+    keep the vehicle's own integer and carry a ``_raw`` suffix, so no attribute ever
+    implies a precision the decoder cannot back up. Attributes typed ``| None`` are
+    the ones the protocol marks OPTIONAL and the vehicle may omit.
+    """
+
+    is_charging: bool
+    """True while the pack is actively charging."""
+    is_plugged_in: bool
+    """True whenever the charge gun is connected (whether charging or not)."""
+    charging_type: int
+    """Charge-type code from the frame; observed 2 while charging, 5/6 when idle or
+    complete. Full code table unconfirmed."""
+    charging_electricity_phase: int | None
+    """Supply phase code; code meanings unconfirmed."""
+
+    soc: float | None
+    """State of charge, percent (0-100); None if the frame omits it."""
+    range_km: float
+    """Estimated electric range, kilometres."""
+
+    charging_voltage: float
+    """Charging (pack) voltage, volts."""
+    charging_current: float
+    """Charging current, amperes; ~0 A when idle, so gate on :attr:`is_charging`."""
+    battery_energy_kwh: float
+    """Energy currently in the pack, kilowatt-hours. Decoded from the frame's
+    ``realtimePower`` field x 0.1 despite the field's misleading name. Empirically
+    SOC x usable capacity: energy / SOC holds at ~37 kWh across every captured
+    frame from 45% to 100% SOC."""
+    working_voltage: float | None
+    """Pack voltage, volts, at coarser (2.5 V) resolution than
+    :attr:`charging_voltage`; mirrors it in every captured frame."""
+    working_current: float | None
+    """Working current, amperes; identical to :attr:`charging_current` in every
+    captured frame (same encoding)."""
+
+    charge_time_elapsed_s: int | None
+    """Elapsed time in the current charge session, seconds; None if absent."""
+    start_time: int | None
+    """Charge-session start, Unix epoch seconds; None when not charging."""
+    end_time: int | None
+    """Estimated charge-session end, Unix epoch seconds; None when not charging."""
+    charging_time_level_prc_raw: int | None
+    """Time-to-target field, raw. Counts down while charging; None here when the
+    frame sends its 0xFFFF idle sentinel. Unit/rate unconfirmed."""
+
+    charging_pile_id: str | None
+    """Identifier of the charge point, when the vehicle reports one."""
+    charging_pile_supplier: str | None
+    """Operator of the charge point, when the vehicle reports one."""
+
+    odometer_km: float
+    """Total distance travelled, kilometres."""
+    distance_since_last_charge_km: float | None
+    """Distance driven since the last charge, kilometres (raw x 0.1); resets to 0
+    at full."""
+    power_usage_since_last_charge_raw: int | None
+    """Energy used since the last charge, in **raw units** (scale unconfirmed;
+    varies inversely with SOC across captures)."""
+    mileage_of_day_raw: int | None
+    """Distance travelled today, in **raw protocol units** (scale unconfirmed)."""
+    power_usage_of_day_raw: int | None
+    """Energy used today, in **raw protocol units** (scale unconfirmed)."""
+    static_energy_consumption_raw: int | None
+    """Static energy consumption, in **raw protocol units** (scale unconfirmed)."""
+
+    total_battery_capacity_kwh: float | None
+    """Total pack capacity, kilowatt-hours (raw x 0.1); absent in captured frames,
+    but the scale matches the global SAIC schema for this field."""
+    last_charge_energy_kwh: float | None
+    """Pack energy at the end of the last charge, kilowatt-hours (raw x 0.1);
+    mirrors :attr:`battery_energy_kwh` in every captured frame."""
+    fota_lowest_voltage_raw: int | None
+    """Lowest cell voltage reported for FOTA, in **raw units** (unconfirmed)."""
+
+    status_time: int
+    """Time this frame was produced, Unix epoch seconds."""
+    extended_data_1: int | None = None
+    """Opaque vendor extension field; contents undocumented."""
+    extended_data_2: int | None = None
+    """Opaque vendor extension field; contents undocumented."""
+    extended_data_3: str | None = None
+    """Opaque vendor extension field; contents undocumented."""
+    extended_data_4: str | None = None
+    """Opaque vendor extension field; contents undocumented."""
+    _raw: dict[str, Any] = field(default_factory=dict)
+    """Full decoded RvsChargingStatus, in raw protocol units.
+
+    Private: kept for debugging and protocol work only. Every field it holds is
+    exposed as a documented attribute above, so consumers should use those instead
+    — the shape and contents of this dict are not part of the public API and may
+    change with the protocol schema at any time.
+    """

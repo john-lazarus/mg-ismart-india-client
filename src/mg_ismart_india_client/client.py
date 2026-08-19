@@ -25,6 +25,7 @@ from .crypto import (
 )
 from .models import (
     Capabilities,
+    ChargeStatus,
     GpsPosition,
     GpsStatus,
     Snapshot,
@@ -33,6 +34,7 @@ from .models import (
 )
 from .tap import (
     codec11,
+    decode_charge_status_response,
     decode_control_response,
     decode_pin_response,
     decode_status_response,
@@ -51,6 +53,11 @@ LOGIN_ATTEMPTS = 3
 LOGIN_DELAY = 1.5
 STATUS_ATTEMPTS = 10
 STATUS_DELAY = 1.5
+# TAP dispatcher `result` codes on the status endpoint. 0 is success; 4 and 6 mean
+# the vehicle has not answered yet, so all three simply continue the poll. 2 means
+# the session is no longer valid and the caller must log in again.
+STATUS_RESULT_PENDING = (0, 4, 6)
+STATUS_RESULT_SESSION_INVALID = 2
 TYRE_PSI_PER_UNIT = 0.2
 LOGIN_DISPATCHER_TEMPLATE_HEX = (
     "11005600882c60c183060c183060c183060c183060c183060c183060c183060c183060c183"
@@ -521,45 +528,53 @@ class MgIndiaClient:
         self.capabilities = discover_capabilities(payloads)
         return self.capabilities
 
-    async def status(self) -> Status:
-        if not self.token:
-            await self.login()
-        if not self.vin:
-            await self.vehicles()
-        headers_base = {
+    async def _post_status_frame(self, event_id: int, error_label: str) -> str:
+        """POST a status-request frame for the given event cursor.
+
+        Shared by status() and charge_status(), which poll the same TAP endpoint
+        for different frame shapes (the full status vs. the charging frame).
+        """
+        body = encode_status_request(
+            self.uid or "0" * 50,
+            self.token or "0" * 40,
+            self.vin or "",
+            event_id,
+        )
+        headers = {
             "User-Agent": USER_AGENT,
             "Content-Type": "text/plain",
             "Accept": "*/*",
             "Accept-Language": "en-US;q=1",
             "SIGNATURE": "1",
+            "APP-SIGNATURE": tap_signature(body),
         }
+        async with self.session.post(
+            TAP_STATUS_URL, data=body, headers=headers, timeout=30
+        ) as response:
+            text = await response.text()
+            if response.status >= 400:
+                raise MgIndiaApiError(f"{error_label} failed: HTTP {response.status}")
+        return text
+
+    async def status(self) -> Status:
+        if not self.token:
+            await self.login()
+        if not self.vin:
+            await self.vehicles()
         for login_attempt in range(2):
             event_id = 0
             for attempt in range(STATUS_ATTEMPTS):
-                body = encode_status_request(
-                    self.uid or "0" * 50,
-                    self.token or "0" * 40,
-                    self.vin or "",
-                    event_id,
-                )
-                headers = dict(headers_base)
-                headers["APP-SIGNATURE"] = tap_signature(body)
-                async with self.session.post(
-                    TAP_STATUS_URL, data=body, headers=headers, timeout=30
-                ) as response:
-                    text = await response.text()
-                    if response.status >= 400:
-                        raise MgIndiaApiError(f"Status failed: HTTP {response.status}")
+                text = await self._post_status_frame(event_id, "Status")
                 dispatcher, payload = decode_status_response(text)
                 result = dispatcher.get("result", 0)
-                if result == 2:
+                if result == STATUS_RESULT_SESSION_INVALID:
                     if login_attempt == 0:
                         await self.login()
                         break
                     raise MgIndiaApiError("TAP status session is invalid")
                 if payload:
                     return parse_status(payload)
-                if result not in (0, 4, 6):
+                if result not in STATUS_RESULT_PENDING:
                     raise MgIndiaApiError(f"Status failed: result {result}")
                 event_id = dispatcher.get("eventID", event_id)
                 if attempt < STATUS_ATTEMPTS - 1:
@@ -567,6 +582,45 @@ class MgIndiaClient:
             else:
                 raise MgIndiaApiError("Vehicle status was not ready after polling")
         raise MgIndiaApiError("Status failed after token refresh")
+
+    async def charge_status(self) -> ChargeStatus | None:
+        """Best-effort EV charging status (the 63-byte app-id 511 frame).
+
+        The charging frame is interleaved with the ordinary status frames on the
+        same endpoint; the exact request that forces it is not yet known, so this
+        polls and returns the first charging frame it sees. Returns None when the
+        poll budget runs out on a healthy session, which is the ordinary "vehicle
+        is not charging" answer. Session and protocol failures raise instead, so
+        they are not misreported as "not charging". See tap.decode_charge_status
+        for the decoded fields.
+        """
+        if not self.token:
+            await self.login()
+        if not self.vin:
+            await self.vehicles()
+        for login_attempt in range(2):
+            event_id = 0
+            for attempt in range(STATUS_ATTEMPTS):
+                text = await self._post_status_frame(event_id, "Charge status")
+                dispatcher, charge = decode_charge_status_response(text)
+                if charge is not None:
+                    return charge
+                result = dispatcher.get("result", 0)
+                if result == STATUS_RESULT_SESSION_INVALID:
+                    if login_attempt == 0:
+                        await self.login()
+                        break
+                    raise MgIndiaApiError("TAP status session is invalid")
+                if result not in STATUS_RESULT_PENDING:
+                    raise MgIndiaApiError(f"Charge status failed: result {result}")
+                event_id = dispatcher.get("eventID", event_id)
+                if attempt < STATUS_ATTEMPTS - 1:
+                    await asyncio.sleep(STATUS_DELAY)
+            else:
+                # Budget spent on a healthy session: the vehicle never sent a
+                # charging frame, i.e. it is not charging.
+                return None
+        return None
 
     async def snapshot(self) -> Snapshot:
         if not self.vehicle:
