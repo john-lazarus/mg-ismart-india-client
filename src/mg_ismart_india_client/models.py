@@ -118,6 +118,9 @@ class Snapshot:
 class ChargeStatus:
     """Decoded EV charging status (the app-id 511 charging frame).
 
+    Produced by :func:`~mg_ismart_india_client.tap.decode_charge_status` and
+    returned by :meth:`~mg_ismart_india_client.client.MgIndiaClient.charge_status`.
+
     Every field the frame carries is exposed here. Those whose scale is confirmed
     (against captured frames spanning roughly 4-18 A charge current and 45-100%
     SOC) are given in real units and named for that unit; those still unconfirmed
@@ -137,7 +140,7 @@ class ChargeStatus:
     """Supply phase code; code meanings unconfirmed."""
 
     soc: float | None
-    """State of charge, percent (0-100); None if the frame omits it."""
+    """State of charge, percent (0-100); ``None`` if the frame omits it."""
     range_km: float
     """Estimated electric range, kilometres."""
 
@@ -158,14 +161,15 @@ class ChargeStatus:
     captured frame (same encoding)."""
 
     charge_time_elapsed_s: int | None
-    """Elapsed time in the current charge session, seconds; None if absent."""
+    """Elapsed time in the current charge session, seconds; ``None`` if absent."""
     start_time: int | None
-    """Charge-session start, Unix epoch seconds; None when not charging."""
+    """Charge-session start, Unix epoch seconds; ``None`` when not charging."""
     end_time: int | None
-    """Estimated charge-session end, Unix epoch seconds; None when not charging."""
+    """Estimated charge-session end, Unix epoch seconds; ``None`` when not
+    charging."""
     charging_time_level_prc_raw: int | None
-    """Time-to-target field, raw. Counts down while charging; None here when the
-    frame sends its 0xFFFF idle sentinel. Unit/rate unconfirmed."""
+    """Time-to-target field, raw. Counts down while charging; ``None`` here when
+    the frame sends its 0xFFFF idle sentinel. Unit/rate unconfirmed."""
 
     charging_pile_id: str | None
     """Identifier of the charge point, when the vehicle reports one."""
@@ -207,7 +211,7 @@ class ChargeStatus:
     extended_data_4: str | None = None
     """Opaque vendor extension field; contents undocumented."""
     _raw: dict[str, Any] = field(default_factory=dict)
-    """Full decoded RvsChargingStatus, in raw protocol units.
+    """Full decoded ``RvsChargingStatus``, in raw protocol units.
 
     Private: kept for debugging and protocol work only. Every field it holds is
     exposed as a documented attribute above, so consumers should use those instead

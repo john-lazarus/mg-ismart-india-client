@@ -531,8 +531,9 @@ class MgIndiaClient:
     async def _post_status_frame(self, event_id: int, error_label: str) -> str:
         """POST a status-request frame for the given event cursor.
 
-        Shared by status() and charge_status(), which poll the same TAP endpoint
-        for different frame shapes (the full status vs. the charging frame).
+        Shared by :meth:`status` and :meth:`charge_status`, which poll the same TAP
+        endpoint for different frame shapes (the full status vs. the charging
+        frame).
         """
         body = encode_status_request(
             self.uid or "0" * 50,
@@ -583,16 +584,28 @@ class MgIndiaClient:
                 raise MgIndiaApiError("Vehicle status was not ready after polling")
         raise MgIndiaApiError("Status failed after token refresh")
 
-    async def charge_status(self) -> ChargeStatus | None:
-        """Best-effort EV charging status (the 63-byte app-id 511 frame).
+    async def charge_status(self) -> ChargeStatus:
+        """EV charging status (the 63-byte app-id 511 frame).
 
         The charging frame is interleaved with the ordinary status frames on the
         same endpoint; the exact request that forces it is not yet known, so this
-        polls and returns the first charging frame it sees. Returns None when the
-        poll budget runs out on a healthy session, which is the ordinary "vehicle
-        is not charging" answer. Session and protocol failures raise instead, so
-        they are not misreported as "not charging". See tap.decode_charge_status
-        for the decoded fields.
+        polls and returns the first charging frame it sees.
+
+        "Plugged in but not charging" is a real frame the vehicle sends, so it
+        comes back as an ordinary :class:`~mg_ismart_india_client.models.ChargeStatus`
+        with :attr:`~mg_ismart_india_client.models.ChargeStatus.is_charging` False.
+        A poll budget that expires without any charging frame therefore means the
+        data was not available -- not that the vehicle is idle -- so this raises
+        rather than returning a ``None`` a caller could mistake for a known state.
+        ``None`` survives only inside the tolerant decoder
+        (:func:`~mg_ismart_india_client.tap.decode_charge_status`), where it means
+        "this frame is not a charging frame". See that function for the decoded
+        fields.
+
+        :returns: the first charging frame the poll observes.
+        :raises MgIndiaApiError: if the poll budget expires without a charging
+            frame, or on session and protocol failures -- neither is reported as
+            "not charging".
         """
         if not self.token:
             await self.login()
@@ -617,10 +630,11 @@ class MgIndiaClient:
                 if attempt < STATUS_ATTEMPTS - 1:
                     await asyncio.sleep(STATUS_DELAY)
             else:
-                # Budget spent on a healthy session: the vehicle never sent a
-                # charging frame, i.e. it is not charging.
-                return None
-        return None
+                # Budget spent on a healthy session: no charging frame arrived.
+                # That is an availability failure, not an observation about the
+                # vehicle -- an idle vehicle sends a frame of its own.
+                raise MgIndiaApiError("Charging status was not available after polling")
+        raise MgIndiaApiError("Charge status failed after token refresh")
 
     async def snapshot(self) -> Snapshot:
         if not self.vehicle:

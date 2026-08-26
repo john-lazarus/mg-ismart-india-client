@@ -8,6 +8,7 @@ untouched -- so each decoded value below still matches what the phone app showed
 on screen at capture time. The frame decodes as the ASN.1 type
 OTARVMVehicleChargingStatusResp recovered from the app.
 """
+
 from __future__ import annotations
 
 import asyncio
@@ -266,16 +267,29 @@ def test_charge_status_returns_first_charging_frame(monkeypatch):
     assert logins == []
 
 
-def test_charge_status_returns_none_when_budget_runs_out(monkeypatch):
-    # a healthy session that simply never yields a charging frame is the ordinary
-    # "not charging" answer, not an error
-    result, event_ids, logins = _run_charge_status(
+def test_charge_status_raises_when_budget_runs_out(monkeypatch):
+    # an idle vehicle sends a charging frame of its own (see test_idle_100), so a
+    # budget that expires without any frame means the data was unavailable, not
+    # that the vehicle is idle. It must not come back as a None the caller could
+    # read as a known state.
+    with pytest.raises(MgIndiaApiError, match="not available after polling"):
+        _run_charge_status(
+            monkeypatch,
+            [({"result": 4, "eventID": index}, None) for index in range(1, 4)],
+        )
+
+
+def test_charge_status_returns_idle_frame_as_a_value(monkeypatch):
+    # plugged-in-but-idle is a frame, not an absence: it comes back as an
+    # ordinary ChargeStatus rather than through the unavailable path
+    result, _event_ids, logins = _run_charge_status(
         monkeypatch,
-        [({"result": 4, "eventID": index}, None) for index in range(1, 4)],
+        [({"result": 0}, decode_charge_status(IDLE_100))],
     )
 
-    assert result is None
-    assert event_ids == [0, 1, 2]
+    assert result is not None
+    assert result.is_charging is False
+    assert result.is_plugged_in is True
     assert logins == []
 
 

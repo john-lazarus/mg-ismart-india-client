@@ -225,28 +225,35 @@ _TIME_LEVEL_NA = 0xFFFF
 
 
 def _amps(raw: int | None) -> float | None:
-    """Charge/working current in amperes, or None. Reads ~0 A at the idle draw."""
+    """Charge/working current in amperes, or ``None``.
+
+    Reads ~0 A at the idle draw, so callers gate on
+    :attr:`~mg_ismart_india_client.models.ChargeStatus.is_charging` rather than on
+    a zero current.
+    """
     if raw is None:
         return None
     return _CURRENT_ZERO_A - raw * _CURRENT_FACTOR
 
 
 def _scaled(raw: int | None, factor: float) -> float | None:
-    """Rescale an OPTIONAL integer field into its unit, passing None through."""
+    """Rescale an OPTIONAL integer field into its unit, passing ``None`` through."""
     return None if raw is None else raw * factor
 
 
 def _decode_charge_app(app: bytes | None) -> ChargeStatus | None:
-    """Decode the application payload of a charging frame, or None if it isn't one.
+    """Decode the application payload of a charging frame, or ``None`` if it
+    isn't one.
 
-    Every field the frame carries is mapped onto a documented ChargeStatus
-    attribute. Values are what the vehicle actually sent: nothing is derived from
-    other fields, and nothing is rounded, so presentation precision stays the
-    caller's decision. Fields with a confirmed scale are rescaled into their
-    declared unit; the rest keep the vehicle's integer and are named with a
-    ``_raw`` suffix rather than being dressed up in a unit the decoder cannot back
-    up. Current reads ~0 A when idle (small housekeeping draw), so callers should
-    still gate current on ``is_charging``.
+    Every field the frame carries is mapped onto a documented
+    :class:`~mg_ismart_india_client.models.ChargeStatus` attribute. Values are what
+    the vehicle actually sent: nothing is derived from other fields, and nothing is
+    rounded, so presentation precision stays the caller's decision. Fields with a
+    confirmed scale are rescaled into their declared unit; the rest keep the
+    vehicle's integer and are named with a ``_raw`` suffix rather than being dressed
+    up in a unit the decoder cannot back up. Current reads ~0 A when idle (small
+    housekeeping draw), so callers should still gate current on
+    :attr:`~mg_ismart_india_client.models.ChargeStatus.is_charging`.
     """
     if not app or len(app) != CHARGE_STATUS_APP_LEN:
         return None
@@ -308,11 +315,13 @@ def decode_charge_status_response(
 ) -> tuple[dict[str, Any], ChargeStatus | None]:
     """Decode a TAP v2.1 frame into its dispatcher and charging status, if present.
 
-    Mirrors decode_status_response / decode_control_response: the dispatcher is
-    always returned (pollers need its result code and event cursor) and the second
-    element is the decoded charging frame, or None when the response carries a
-    different frame shape. Raises ValueError on malformed framing, so a poller that
-    can no longer read the dispatcher fails loudly instead of polling blind.
+    Mirrors :func:`decode_status_response` / :func:`decode_control_response`: the
+    dispatcher is always returned (pollers need its result code and event cursor)
+    and the second element is the decoded charging frame, or ``None`` when the
+    response carries a different frame shape.
+
+    :raises ValueError: if the framing is malformed, so a poller that can no longer
+        read the dispatcher fails loudly instead of polling blind.
     """
     dispatcher, app = _decode_v21(raw)
     return dispatcher, _decode_charge_app(app)
@@ -321,9 +330,12 @@ def decode_charge_status_response(
 def decode_charge_status(raw: str) -> ChargeStatus | None:
     """Decode the 63-byte EV-charging status frame (app-id 511).
 
-    Tolerant wrapper around decode_charge_status_response for callers that only
-    want the charging data: returns None when the frame is not the 63-byte charging
-    shape (e.g. it's the 195-byte full status, an empty ack, or malformed).
+    Tolerant wrapper around :func:`decode_charge_status_response` for callers that
+    only want the charging data: returns ``None`` when the frame is not the 63-byte
+    charging shape (e.g. it's the 195-byte full status, an empty ack, or malformed).
+    This is the only place ``None`` means "not a charging frame";
+    :meth:`~mg_ismart_india_client.client.MgIndiaClient.charge_status` raises
+    instead of passing it on.
     """
     try:
         return decode_charge_status_response(raw)[1]
