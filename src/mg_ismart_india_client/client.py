@@ -304,6 +304,10 @@ def discover_capabilities(payloads: list[dict[str, Any]]) -> Capabilities:
     )
 
 
+class ChargingStatusUnavailable(MgIndiaApiError):
+    """No charging frame was observed within the poll budget."""
+
+
 class MgIndiaLoginRejected(MgIndiaApiError):
     """Definitive server verdict on a login (bad password, unregistered number,
     daily attempt limit). Terminal - retrying only wastes daily attempts."""
@@ -603,9 +607,10 @@ class MgIndiaClient:
         fields.
 
         :returns: the first charging frame the poll observes.
-        :raises MgIndiaApiError: if the poll budget expires without a charging
-            frame, or on session and protocol failures -- neither is reported as
-            "not charging".
+        :raises ChargingStatusUnavailable: if the poll budget expires without a
+            charging frame.
+        :raises MgIndiaApiError: on session and protocol failures -- none is
+            reported as "not charging".
         """
         if not self.token:
             await self.login()
@@ -633,7 +638,9 @@ class MgIndiaClient:
                 # Budget spent on a healthy session: no charging frame arrived.
                 # That is an availability failure, not an observation about the
                 # vehicle -- an idle vehicle sends a frame of its own.
-                raise MgIndiaApiError("Charging status was not available after polling")
+                raise ChargingStatusUnavailable(
+                    "Charging status was not available after polling"
+                )
         raise MgIndiaApiError("Charge status failed after token refresh")
 
     async def snapshot(self) -> Snapshot:

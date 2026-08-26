@@ -16,7 +16,11 @@ import asyncio
 import asn1tools
 import pytest
 
-from mg_ismart_india_client import MgIndiaApiError, MgIndiaClient
+from mg_ismart_india_client import (
+    ChargingStatusUnavailable,
+    MgIndiaApiError,
+    MgIndiaClient,
+)
 from mg_ismart_india_client.tap import (
     _decode_v21,
     codec21,
@@ -272,7 +276,9 @@ def test_charge_status_raises_when_budget_runs_out(monkeypatch):
     # budget that expires without any frame means the data was unavailable, not
     # that the vehicle is idle. It must not come back as a None the caller could
     # read as a known state.
-    with pytest.raises(MgIndiaApiError, match="not available after polling"):
+    with pytest.raises(
+        ChargingStatusUnavailable, match="not available after polling"
+    ):
         _run_charge_status(
             monkeypatch,
             [({"result": 4, "eventID": index}, None) for index in range(1, 4)],

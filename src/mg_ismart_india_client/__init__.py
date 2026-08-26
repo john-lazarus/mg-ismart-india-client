@@ -1,3 +1,4 @@
+from .client import ChargingStatusUnavailable as ChargingStatusUnavailable
 from .client import MgIndiaClient as MgIndiaClient
 from .client import parse_gps_position as parse_gps_position
 from .client import parse_status as parse_status
