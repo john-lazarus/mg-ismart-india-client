@@ -1,9 +1,11 @@
+from .client import ChargingStatusUnavailable as ChargingStatusUnavailable
 from .client import MgIndiaClient as MgIndiaClient
 from .client import parse_gps_position as parse_gps_position
 from .client import parse_status as parse_status
 from .crypto import MgIndiaApiError as MgIndiaApiError
 from .crypto import hash_control_pin as hash_control_pin
 from .models import Capabilities as Capabilities
+from .models import ChargeStatus as ChargeStatus
 from .models import GpsPosition as GpsPosition
 from .models import GpsStatus as GpsStatus
 from .models import Snapshot as Snapshot
