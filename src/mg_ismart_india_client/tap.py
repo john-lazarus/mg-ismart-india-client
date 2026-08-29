@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 import time
 from functools import lru_cache
 from typing import Any
@@ -7,6 +8,8 @@ from typing import Any
 import asn1tools
 
 from .models import ChargeStatus
+
+_LOGGER = logging.getLogger(__name__)
 
 TAP_RESERVED_SIZE = 16
 TAP_PROTOCOL_VERSION = 33
@@ -325,6 +328,44 @@ def decode_charge_status_response(
     """
     dispatcher, app = _decode_v21(raw)
     return dispatcher, _decode_charge_app(app)
+
+
+def decode_status_and_charge(
+    raw: str,
+) -> tuple[dict[str, Any], dict[str, Any] | None, ChargeStatus | None]:
+    """Decode one TAP frame into its dispatcher, full status, and charging status.
+
+    A single TAP poll stream interleaves the 195-byte full-status frame
+    (``OTARVMVehicleStatusResp513``) and the 63-byte charging frame, so a caller
+    that wants both can collect them from one loop instead of polling the endpoint
+    twice. This decodes whichever shape a given response carries without raising on
+    the other: the status dict is ``None`` unless the frame is the full status, the
+    :class:`~mg_ismart_india_client.models.ChargeStatus` is ``None`` unless it is
+    the charging frame, and both are ``None`` for an empty/ack frame. The
+    dispatcher is always returned so the poller keeps its result code and event
+    cursor.
+
+    :raises ValueError: if the framing is malformed (same contract as the
+        single-shape decoders), so a poller that can no longer read the dispatcher
+        fails loudly instead of polling blind.
+    """
+    dispatcher, app = _decode_v21(raw)
+    if not app:
+        return dispatcher, None, None
+    charge = _decode_charge_app(app)
+    if charge is not None:
+        return dispatcher, None, charge
+    try:
+        status = codec21().decode("OTARVMVehicleStatusResp513", app)
+    except (ValueError, TypeError, KeyError, IndexError, asn1tools.Error) as exc:
+        # Not the full-status shape either (e.g. a control result): report neither
+        # frame rather than raising, so the poll loop keeps going. Logged because
+        # this is also where a schema regression would land, and silently it looks
+        # identical to an ordinary non-status frame -- the poll then spends its
+        # whole budget and fails with "not ready after polling" and no cause.
+        _LOGGER.debug("Frame is not the full-status shape: %s", exc)
+        status = None
+    return dispatcher, status, charge
 
 
 def decode_charge_status(raw: str) -> ChargeStatus | None:

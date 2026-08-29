@@ -2,7 +2,9 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import time
+from dataclasses import replace
 from typing import Any
 from urllib.parse import urlencode
 
@@ -30,18 +32,20 @@ from .models import (
     GpsStatus,
     Snapshot,
     Status,
+    SubaccountGrant,
     Vehicle,
 )
 from .tap import (
     codec11,
-    decode_charge_status_response,
     decode_control_response,
     decode_pin_response,
-    decode_status_response,
+    decode_status_and_charge,
     encode_control_request,
     encode_pin_request,
     encode_status_request,
 )
+
+_LOGGER = logging.getLogger(__name__)
 
 TAP_LOGIN_URL = "https://iov-tap.mgindia.co.in/TAP.Web/ota.mp"
 TAP_STATUS_URL = "https://iov-tap.mgindia.co.in/TAP.Web/ota.mpv21"
@@ -163,6 +167,31 @@ def parse_gps_position(raw: Any) -> GpsPosition | None:
     )
 
 
+def parse_subaccount_grant(raw: dict[str, Any]) -> SubaccountGrant:
+    """Parse one ``subaccountInfo``/``subaccountList`` object into a grant.
+
+    Field names are copied straight from the API; the whole object is kept on
+    :attr:`~mg_ismart_india_client.models.SubaccountGrant.raw` for anything not
+    surfaced as an attribute.
+    """
+    return SubaccountGrant(
+        subaccount_id=_int(raw.get("subaccountId")),
+        subscriber_id=_int(raw.get("subscriberId")),
+        authorized_subscriber_id=_int(raw.get("authorizedSubscriberId")),
+        user_name=raw.get("userName"),
+        user_account=raw.get("userAccount"),
+        authorization_card_type=_int(raw.get("authorizationCardType")),
+        location_authorization=_int(raw.get("locationAuthorization")),
+        validity_start_time=_int(raw.get("validityStartTime")),
+        validity_end_time=_int(raw.get("validityEndTime")),
+        operation_type=_int(raw.get("operationType")),
+        status=_int(raw.get("status")),
+        create_date=_int(raw.get("createDate")),
+        vin=raw.get("vin"),
+        raw=raw,
+    )
+
+
 def parse_vehicle(raw: dict[str, Any]) -> Vehicle:
     vin = raw.get("vin") or raw.get("VIN") or raw.get("vinNo") or raw.get("vehicleVin")
     if not vin:
@@ -173,6 +202,7 @@ def parse_vehicle(raw: dict[str, Any]) -> Vehicle:
         or raw.get("brandName")
         or str(vin)[-6:]
     )
+    grant = raw.get("subaccountInfo")
     return Vehicle(
         vin=str(vin),
         name=str(name),
@@ -182,6 +212,21 @@ def parse_vehicle(raw: dict[str, Any]) -> Vehicle:
         raw=raw,
         color_name=raw.get("colorName"),
         series=raw.get("series"),
+        is_subaccount=_bool(raw.get("isSubaccount")),
+        is_current_vehicle=_bool(raw.get("isCurrentVehicle")),
+        is_activated=_bool(raw.get("isActivate")),
+        bind_time=_int(raw.get("bindTime")),
+        tbox_sim_no=(
+            str(raw["tboxSimNo"]) if raw.get("tboxSimNo") is not None else None
+        ),
+        subaccount_grant=(
+            parse_subaccount_grant(grant) if isinstance(grant, dict) else None
+        ),
+        subaccounts=[
+            parse_subaccount_grant(x)
+            for x in (raw.get("subaccountList") or [])
+            if isinstance(x, dict)
+        ],
     )
 
 
@@ -306,6 +351,44 @@ def discover_capabilities(payloads: list[dict[str, Any]]) -> Capabilities:
 
 class ChargingStatusUnavailable(MgIndiaApiError):
     """No charging frame was observed within the poll budget."""
+
+
+def is_subaccount(vehicle: Vehicle | None) -> bool:
+    """True when this account is a secondary (granted-access) one for the vehicle.
+
+    The single place the role test lives, so the warning and the
+    :exc:`ChargingStatusUnavailable` hint cannot drift apart on *when* they fire
+    while keeping their own wording. ``False`` for a primary account and for an
+    unknown role -- an absent ``isSubaccount`` is never read as secondary.
+    """
+    return vehicle is not None and bool(vehicle.is_subaccount)
+
+
+def subaccount_charge_warning(vehicle: Vehicle | None) -> str | None:
+    """Explanation for a charging poll that came back empty, or ``None``.
+
+    Emitted *after* a poll that asked for charging and got no frame, to say that
+    the empty result is expected for this account rather than a fault: charging
+    telemetry is disabled server-side for a secondary (granted-access) account
+    today. It is never a reason to skip the poll — the owner may enable the
+    grant, or MG may change the gating, and the frame then arrives on its own.
+    The primary-vs-secondary role can only be told from the vehicle list
+    (``isSubaccount``); the charging response itself carries no marker
+    distinguishing the two. Returns ``None`` when the account is primary or its
+    role is unknown, and for a poll that *did* return a frame — a secondary
+    account whose charging works is not worth warning about.
+    """
+    if vehicle is None or not is_subaccount(vehicle):
+        return None
+    # Last 6 of the VIN, the same short form parse_vehicle falls back to for a
+    # display name. Enough to tell two cars apart in a log without putting a full
+    # VIN in a WARNING that users paste into bug reports.
+    return (
+        f"No charging data came back for vehicle ...{vehicle.vin[-6:]}, which is "
+        "on a secondary (shared) account; charging telemetry is typically "
+        "disabled server-side for such accounts. Charging is still polled every "
+        "time, so the data will appear on its own if the grant is enabled."
+    )
 
 
 class MgIndiaLoginRejected(MgIndiaApiError):
@@ -561,39 +644,164 @@ class MgIndiaClient:
                 raise MgIndiaApiError(f"{error_label} failed: HTTP {response.status}")
         return text
 
-    async def status(self) -> Status:
+    async def _poll_status_and_charge(
+        self, *, need_status: bool, need_charge: bool, label: str
+    ) -> tuple[Status | None, ChargeStatus | None]:
+        """Poll the TAP endpoint once, collecting the status and/or charge frame.
+
+        The 195-byte full-status frame and the 63-byte charging frame ride the same
+        poll stream, interleaved, so one loop can gather both. ``need_status`` /
+        ``need_charge`` set the stopping condition: the loop returns as soon as
+        every requested frame has been seen, and otherwise runs out the poll
+        budget. Either element of the returned pair is ``None`` when that frame did
+        not arrive; the callers turn a missing *required* frame into their own
+        error, so this stays the single place the poll logic lives.
+
+        Nothing here is conditioned on the account role. A secondary account is
+        expected to come back without a charging frame today, but that is a
+        server-side grant that can change: the poll always asks, so the day
+        charging telemetry is enabled for such an account the frame is returned
+        with no change to this client.
+
+        :raises MgIndiaApiError: on a non-pending dispatcher result or a session
+            that stays invalid across a re-login -- protocol/session faults, never
+            reported as "no data".
+        """
         if not self.token:
             await self.login()
         if not self.vin:
             await self.vehicles()
+        status_obj: Status | None = None
+        charge_obj: ChargeStatus | None = None
         for login_attempt in range(2):
             event_id = 0
             for attempt in range(STATUS_ATTEMPTS):
-                text = await self._post_status_frame(event_id, "Status")
-                dispatcher, payload = decode_status_response(text)
+                text = await self._post_status_frame(event_id, label)
+                dispatcher, status_payload, charge = decode_status_and_charge(text)
+                if status_payload is not None and status_obj is None:
+                    status_obj = parse_status(status_payload)
+                if charge is not None and charge_obj is None:
+                    charge_obj = charge
+                if (status_obj is not None or not need_status) and (
+                    charge_obj is not None or not need_charge
+                ):
+                    return status_obj, charge_obj
                 result = dispatcher.get("result", 0)
                 if result == STATUS_RESULT_SESSION_INVALID:
                     if login_attempt == 0:
                         await self.login()
                         break
-                    raise MgIndiaApiError("TAP status session is invalid")
-                if payload:
-                    return parse_status(payload)
+                    raise MgIndiaApiError(f"TAP {label.lower()} session is invalid")
                 if result not in STATUS_RESULT_PENDING:
-                    raise MgIndiaApiError(f"Status failed: result {result}")
+                    if need_status and status_obj is not None:
+                        # A required frame already decoded on an earlier poll of
+                        # this stream. An error result on a *later* frame must not
+                        # discard it -- the caller asked for the status and it
+                        # arrived, so hand it back with whatever else was
+                        # collected instead of failing the whole call.
+                        return status_obj, charge_obj
+                    raise MgIndiaApiError(f"{label} failed: result {result}")
                 event_id = dispatcher.get("eventID", event_id)
                 if attempt < STATUS_ATTEMPTS - 1:
                     await asyncio.sleep(STATUS_DELAY)
             else:
-                raise MgIndiaApiError("Vehicle status was not ready after polling")
-        raise MgIndiaApiError("Status failed after token refresh")
+                # Budget spent on a healthy session; return whatever was collected.
+                return status_obj, charge_obj
+        # Only reachable if the inner loop broke on both passes, which it cannot:
+        # it breaks solely for a session refresh on login_attempt 0, and the
+        # second pass raises instead. Kept as a raise rather than a return so a
+        # future edit that does reach it reports a session fault as one -- a
+        # silent empty return here would surface from charge_status() as
+        # ChargingStatusUnavailable, which promises the opposite.
+        raise MgIndiaApiError(f"{label} failed after token refresh")
+
+    def _warn_if_charge_missing(self, charge: ChargeStatus | None) -> None:
+        """Warn when a wanted charging frame did not arrive on a secondary account.
+
+        Emitted *after* the poll, never before it, and only for the poll that
+        actually came back empty: the account role explains missing charging
+        data, it is not a reason to skip asking for it. So if MG (or the owner)
+        enables charging telemetry for a secondary account, the frame simply
+        starts arriving and this stops firing -- no change to the client, and no
+        warning left standing over working data.
+
+        Logged on every such poll rather than deduplicated, so the condition
+        stays visible in the log for as long as it actually holds.
+        """
+        if charge is not None:
+            return
+        # The role is only knowable from the vehicle list; callers load it via
+        # vehicles() (HA does so on setup). Don't force an extra round trip just
+        # to warn here -- an unknown role simply yields no warning.
+        warning = subaccount_charge_warning(self.vehicle)
+        if warning:
+            _LOGGER.warning(warning)
+
+    def _charging_unavailable(self) -> ChargingStatusUnavailable:
+        """The exhausted-budget charging error, hinting at the subaccount case."""
+        message = "Charging status was not available after polling"
+        if is_subaccount(self.vehicle):
+            message += (
+                " (this is a secondary/shared account; charging telemetry is "
+                "typically disabled server-side for it)"
+            )
+        return ChargingStatusUnavailable(message)
+
+    async def status(self, *, include_charge: bool = False) -> Status:
+        """Full vehicle status, optionally with the EV charging frame attached.
+
+        The 195-byte full-status frame and the 63-byte charging frame ride the
+        same TAP poll stream, interleaved, so one poll loop can collect both.
+
+        ``include_charge`` decides only how long the loop is willing to *wait*:
+        left ``False`` (the default) it returns the moment the status frame
+        arrives, which is the cheap path an ICE vehicle or a status-only refresh
+        wants. Set it ``True`` and the loop waits out the poll budget for a
+        charging frame too, which costs the same as :meth:`charge_status` while
+        yielding the status for free -- the efficient path for an EV caller that
+        needs both each refresh (e.g. Home Assistant). Either way a charging
+        frame that happens to arrive is attached, so
+        :attr:`~..models.Status.charge` can be set even with ``include_charge``
+        off.
+
+        :attr:`~..models.Status.charge` is ``None`` when no charging frame
+        arrived -- a routine outcome (``include_charge`` off, a non-EV, an
+        expired budget, or a secondary account whose charging telemetry is
+        disabled server-side), not an error. Use :meth:`charge_status` when a
+        missing charging frame should raise instead.
+
+        The account role never gates the request: a secondary account is polled
+        for charging exactly like a primary one, so if that telemetry is enabled
+        for it server-side the frame arrives and is returned with no change here.
+        The role is used only to explain a frame that did *not* arrive, as a
+        warning logged after the fact on each poll that comes back empty.
+
+        :param include_charge: wait out the poll budget for a charging frame.
+        :returns: the vehicle status, with :attr:`~..models.Status.charge` set
+            when a charging frame was seen.
+        :raises MgIndiaApiError: if the status frame never arrives, or on session
+            and protocol failures.
+        """
+        status_obj, charge_obj = await self._poll_status_and_charge(
+            need_status=True, need_charge=include_charge, label="Status"
+        )
+        if status_obj is None:
+            raise MgIndiaApiError("Vehicle status was not ready after polling")
+        if include_charge:
+            self._warn_if_charge_missing(charge_obj)
+        if charge_obj is not None:
+            status_obj = replace(status_obj, charge=charge_obj)
+        return status_obj
 
     async def charge_status(self) -> ChargeStatus:
         """EV charging status (the 63-byte app-id 511 frame).
 
         The charging frame is interleaved with the ordinary status frames on the
         same endpoint; the exact request that forces it is not yet known, so this
-        polls and returns the first charging frame it sees.
+        polls and returns the first charging frame it sees. When both the status
+        and the charging frame are wanted (e.g. a Home Assistant refresh), prefer
+        ``status(include_charge=True)``, which collects both from a single poll
+        instead of polling this endpoint twice.
 
         "Plugged in but not charging" is a real frame the vehicle sends, so it
         comes back as an ordinary :class:`~mg_ismart_india_client.models.ChargeStatus`
@@ -606,42 +814,28 @@ class MgIndiaClient:
         "this frame is not a charging frame". See that function for the decoded
         fields.
 
+        A secondary (shared) account is polled exactly like a primary one. Its
+        charging telemetry is disabled server-side today, so the poll comes back
+        empty; the raised :exc:`ChargingStatusUnavailable` then names the account
+        as the likely reason and a warning says the same, for the benefit of a
+        caller that swallows the exception. The role is only ever an
+        explanation for an absent frame, never a reason to skip asking: if the
+        grant is enabled the frame arrives and is returned like any other, with
+        no change here.
+
         :returns: the first charging frame the poll observes.
         :raises ChargingStatusUnavailable: if the poll budget expires without a
             charging frame.
         :raises MgIndiaApiError: on session and protocol failures -- none is
             reported as "not charging".
         """
-        if not self.token:
-            await self.login()
-        if not self.vin:
-            await self.vehicles()
-        for login_attempt in range(2):
-            event_id = 0
-            for attempt in range(STATUS_ATTEMPTS):
-                text = await self._post_status_frame(event_id, "Charge status")
-                dispatcher, charge = decode_charge_status_response(text)
-                if charge is not None:
-                    return charge
-                result = dispatcher.get("result", 0)
-                if result == STATUS_RESULT_SESSION_INVALID:
-                    if login_attempt == 0:
-                        await self.login()
-                        break
-                    raise MgIndiaApiError("TAP status session is invalid")
-                if result not in STATUS_RESULT_PENDING:
-                    raise MgIndiaApiError(f"Charge status failed: result {result}")
-                event_id = dispatcher.get("eventID", event_id)
-                if attempt < STATUS_ATTEMPTS - 1:
-                    await asyncio.sleep(STATUS_DELAY)
-            else:
-                # Budget spent on a healthy session: no charging frame arrived.
-                # That is an availability failure, not an observation about the
-                # vehicle -- an idle vehicle sends a frame of its own.
-                raise ChargingStatusUnavailable(
-                    "Charging status was not available after polling"
-                )
-        raise MgIndiaApiError("Charge status failed after token refresh")
+        _, charge_obj = await self._poll_status_and_charge(
+            need_status=False, need_charge=True, label="Charge status"
+        )
+        self._warn_if_charge_missing(charge_obj)
+        if charge_obj is None:
+            raise self._charging_unavailable()
+        return charge_obj
 
     async def snapshot(self) -> Snapshot:
         if not self.vehicle:

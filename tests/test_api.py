@@ -66,6 +66,121 @@ def test_vehicle_legacy_positional_arguments():
     assert (vehicle.raw, vehicle.color_name, vehicle.series) == (raw, None, None)
 
 
+def test_vehicle_parser_primary_vs_secondary():
+    # userVinList carries isSubaccount: false on the owner (primary) account and
+    # true on an account the owner has shared the car with (secondary). It is the
+    # reliable primary-vs-secondary discriminator; a primary entry also carries an
+    # (often empty) subaccountList, a secondary entry a subaccountInfo grant.
+    primary = parse_vehicle(
+        {
+            "vin": "LSJA00000TEST0001",
+            "isSubaccount": False,
+            "subaccountList": [],
+        }
+    )
+    assert primary.is_subaccount is False
+    assert primary.is_primary_account is True
+
+    secondary = parse_vehicle(
+        {
+            "vin": "LSJA00000TEST0001",
+            "isSubaccount": True,
+            "subaccountInfo": {"subaccountId": 1, "userName": "Guest"},
+        }
+    )
+    assert secondary.is_subaccount is True
+    assert secondary.is_primary_account is False
+
+
+def test_vehicle_parser_subaccount_absent_is_unknown():
+    # Older/partial responses may omit the flag entirely; the role is then unknown
+    # rather than silently assumed to be primary.
+    v = parse_vehicle({"vin": "LSJA00000TEST0001"})
+    assert v.is_subaccount is None
+    assert v.is_primary_account is None
+
+
+def test_vehicle_parser_maps_binding_and_activation_fields():
+    v = parse_vehicle(
+        {
+            "vin": "LSJA00000TEST0001",
+            "isCurrentVehicle": True,
+            "isActivate": True,
+            "bindTime": 1736234905000,
+            "tboxSimNo": "000000000000000",
+            "subaccountList": [],
+        }
+    )
+    assert v.is_current_vehicle is True
+    assert v.is_activated is True
+    assert v.bind_time == 1736234905000
+    assert v.tbox_sim_no == "000000000000000"
+    assert v.subaccount_grant is None
+    assert v.subaccounts == []
+
+
+def test_vehicle_parser_maps_secondary_grant():
+    # a secondary account's entry carries its own grant under subaccountInfo
+    v = parse_vehicle(
+        {
+            "vin": "LSJA00000TEST0001",
+            "isSubaccount": True,
+            "subaccountInfo": {
+                "subaccountId": 1,
+                "authorizationCardType": 1,
+                "locationAuthorization": 1,
+                "userName": "Guest",
+                "userAccount": "0000000000",
+                "validityStartTime": 100,
+                "validityEndTime": 0,
+            },
+        }
+    )
+    grant = v.subaccount_grant
+    assert grant is not None
+    assert grant.subaccount_id == 1
+    assert grant.authorization_card_type == 1
+    assert grant.location_authorization == 1
+    assert grant.user_name == "Guest"
+    assert grant.validity_end_time == 0
+    assert v.subaccounts == []
+
+
+def test_vehicle_parser_maps_primary_subaccount_list():
+    # a primary account's entry lists the accounts it has shared the car with
+    v = parse_vehicle(
+        {
+            "vin": "LSJA00000TEST0001",
+            "isSubaccount": False,
+            "subaccountList": [
+                {"subaccountId": 2, "userName": "Guest", "authorizationCardType": 1},
+            ],
+        }
+    )
+    assert v.subaccount_grant is None
+    assert len(v.subaccounts) == 1
+    assert v.subaccounts[0].subaccount_id == 2
+    assert v.subaccounts[0].user_name == "Guest"
+
+
+def test_subaccount_charge_warning():
+    from mg_ismart_india_client.client import subaccount_charge_warning
+
+    primary = parse_vehicle({"vin": "LSJA00000TEST0001", "isSubaccount": False})
+    secondary = parse_vehicle({"vin": "LSJA00000TEST0001", "isSubaccount": True})
+    unknown = parse_vehicle({"vin": "LSJA00000TEST0001"})
+
+    assert subaccount_charge_warning(primary) is None
+    assert subaccount_charge_warning(unknown) is None
+    assert subaccount_charge_warning(None) is None
+    message = subaccount_charge_warning(secondary)
+    assert message is not None
+    assert "secondary" in message
+    # the VIN is shortened: users paste warnings into public bug reports
+    assert "LSJA00000TEST0001" not in message
+    assert "ST0001" in message
+
+
 def test_status_parser():
     s = parse_status(
         {
