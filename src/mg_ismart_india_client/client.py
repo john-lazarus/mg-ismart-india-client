@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import json
 import time
+from dataclasses import replace
 from typing import Any
 from urllib.parse import urlencode
 
@@ -34,10 +35,9 @@ from .models import (
 )
 from .tap import (
     codec11,
-    decode_charge_status_response,
     decode_control_response,
     decode_pin_response,
-    decode_status_response,
+    decode_status_and_charge,
     encode_control_request,
     encode_pin_request,
     encode_status_request,
@@ -561,39 +561,110 @@ class MgIndiaClient:
                 raise MgIndiaApiError(f"{error_label} failed: HTTP {response.status}")
         return text
 
-    async def status(self) -> Status:
+    async def _poll_status_and_charge(
+        self, *, need_status: bool, need_charge: bool, label: str
+    ) -> tuple[Status | None, ChargeStatus | None]:
+        """Poll the TAP endpoint once, collecting the status and/or charge frame.
+
+        The 195-byte full-status frame and the 63-byte charging frame ride the same
+        poll stream, interleaved, so one loop can gather both. ``need_status`` /
+        ``need_charge`` set the stopping condition: the loop returns as soon as
+        every requested frame has been seen, and otherwise runs out the poll
+        budget. Either element of the returned pair is ``None`` when that frame did
+        not arrive; the callers turn a missing *required* frame into their own
+        error, so this stays the single place the poll logic lives.
+
+        :raises MgIndiaApiError: on a non-pending dispatcher result or a session
+            that stays invalid across a re-login -- protocol/session faults, never
+            reported as "no data".
+        """
         if not self.token:
             await self.login()
         if not self.vin:
             await self.vehicles()
+        status_obj: Status | None = None
+        charge_obj: ChargeStatus | None = None
         for login_attempt in range(2):
             event_id = 0
             for attempt in range(STATUS_ATTEMPTS):
-                text = await self._post_status_frame(event_id, "Status")
-                dispatcher, payload = decode_status_response(text)
+                text = await self._post_status_frame(event_id, label)
+                dispatcher, status_payload, charge = decode_status_and_charge(text)
+                if status_payload is not None and status_obj is None:
+                    status_obj = parse_status(status_payload)
+                if charge is not None and charge_obj is None:
+                    charge_obj = charge
                 result = dispatcher.get("result", 0)
                 if result == STATUS_RESULT_SESSION_INVALID:
                     if login_attempt == 0:
                         await self.login()
                         break
-                    raise MgIndiaApiError("TAP status session is invalid")
-                if payload:
-                    return parse_status(payload)
+                    raise MgIndiaApiError(f"TAP {label.lower()} session is invalid")
                 if result not in STATUS_RESULT_PENDING:
-                    raise MgIndiaApiError(f"Status failed: result {result}")
+                    raise MgIndiaApiError(f"{label} failed: result {result}")
+                if (status_obj is not None or not need_status) and (
+                    charge_obj is not None or not need_charge
+                ):
+                    return status_obj, charge_obj
                 event_id = dispatcher.get("eventID", event_id)
                 if attempt < STATUS_ATTEMPTS - 1:
                     await asyncio.sleep(STATUS_DELAY)
             else:
-                raise MgIndiaApiError("Vehicle status was not ready after polling")
-        raise MgIndiaApiError("Status failed after token refresh")
+                # Budget spent on a healthy session; return whatever was collected.
+                return status_obj, charge_obj
+        # Only reachable if the inner loop broke on both passes, which it cannot:
+        # it breaks solely for a session refresh on login_attempt 0, and the
+        # second pass raises instead. Kept as a raise rather than a return so a
+        # future edit that does reach it reports a session fault as one -- a
+        # silent empty return here would surface from charge_status() as
+        # ChargingStatusUnavailable, which promises the opposite.
+        raise MgIndiaApiError(f"{label} failed after token refresh")
+
+    async def status(self, *, include_charge: bool = False) -> Status:
+        """Full vehicle status, optionally with the EV charging frame attached.
+
+        The 195-byte full-status frame and the 63-byte charging frame ride the
+        same TAP poll stream, interleaved, so one poll loop can collect both.
+
+        ``include_charge`` decides only how long the loop is willing to *wait*:
+        left ``False`` (the default) it returns the moment the status frame
+        arrives, which is the cheap path an ICE vehicle or a status-only refresh
+        wants. Set it ``True`` and the loop waits out the poll budget for a
+        charging frame too, which costs the same as :meth:`charge_status` while
+        yielding the status for free -- the efficient path for an EV caller that
+        needs both each refresh (e.g. Home Assistant). Either way a charging
+        frame that happens to arrive is attached, so
+        :attr:`~..models.Status.charge` can be set even with ``include_charge``
+        off.
+
+        :attr:`~..models.Status.charge` is ``None`` when no charging frame
+        arrived -- a routine outcome (``include_charge`` off, a non-EV, or an
+        expired budget), not an error. Use :meth:`charge_status` when a missing
+        charging frame should raise instead.
+
+        :param include_charge: wait out the poll budget for a charging frame.
+        :returns: the vehicle status, with :attr:`~..models.Status.charge` set
+            when a charging frame was seen.
+        :raises MgIndiaApiError: if the status frame never arrives, or on session
+            and protocol failures.
+        """
+        status_obj, charge_obj = await self._poll_status_and_charge(
+            need_status=True, need_charge=include_charge, label="Status"
+        )
+        if status_obj is None:
+            raise MgIndiaApiError("Vehicle status was not ready after polling")
+        if charge_obj is not None:
+            status_obj = replace(status_obj, charge=charge_obj)
+        return status_obj
 
     async def charge_status(self) -> ChargeStatus:
         """EV charging status (the 63-byte app-id 511 frame).
 
         The charging frame is interleaved with the ordinary status frames on the
         same endpoint; the exact request that forces it is not yet known, so this
-        polls and returns the first charging frame it sees.
+        polls and returns the first charging frame it sees. When both the status
+        and the charging frame are wanted (e.g. a Home Assistant refresh), prefer
+        ``status(include_charge=True)``, which collects both from a single poll
+        instead of polling this endpoint twice.
 
         "Plugged in but not charging" is a real frame the vehicle sends, so it
         comes back as an ordinary :class:`~mg_ismart_india_client.models.ChargeStatus`
@@ -612,36 +683,14 @@ class MgIndiaClient:
         :raises MgIndiaApiError: on session and protocol failures -- none is
             reported as "not charging".
         """
-        if not self.token:
-            await self.login()
-        if not self.vin:
-            await self.vehicles()
-        for login_attempt in range(2):
-            event_id = 0
-            for attempt in range(STATUS_ATTEMPTS):
-                text = await self._post_status_frame(event_id, "Charge status")
-                dispatcher, charge = decode_charge_status_response(text)
-                if charge is not None:
-                    return charge
-                result = dispatcher.get("result", 0)
-                if result == STATUS_RESULT_SESSION_INVALID:
-                    if login_attempt == 0:
-                        await self.login()
-                        break
-                    raise MgIndiaApiError("TAP status session is invalid")
-                if result not in STATUS_RESULT_PENDING:
-                    raise MgIndiaApiError(f"Charge status failed: result {result}")
-                event_id = dispatcher.get("eventID", event_id)
-                if attempt < STATUS_ATTEMPTS - 1:
-                    await asyncio.sleep(STATUS_DELAY)
-            else:
-                # Budget spent on a healthy session: no charging frame arrived.
-                # That is an availability failure, not an observation about the
-                # vehicle -- an idle vehicle sends a frame of its own.
-                raise ChargingStatusUnavailable(
-                    "Charging status was not available after polling"
-                )
-        raise MgIndiaApiError("Charge status failed after token refresh")
+        _, charge_obj = await self._poll_status_and_charge(
+            need_status=False, need_charge=True, label="Charge status"
+        )
+        if charge_obj is None:
+            raise ChargingStatusUnavailable(
+                "Charging status was not available after polling"
+            )
+        return charge_obj
 
     async def snapshot(self) -> Snapshot:
         if not self.vehicle:

@@ -20,6 +20,7 @@ from mg_ismart_india_client import (
     ChargingStatusUnavailable,
     MgIndiaApiError,
     MgIndiaClient,
+    Status,
 )
 from mg_ismart_india_client.tap import (
     _decode_v21,
@@ -199,11 +200,15 @@ def test_wrong_length_app_that_fails_asn_decode_returns_none():
 
 # --- charge_status() polling loop -------------------------------------------
 #
-# These drive the loop through _post_status_frame and decode_charge_status_response
+# These drive the loop through _post_status_frame and decode_status_and_charge
 # rather than over HTTP, so each test scripts exactly the frames the vehicle
 # returns and asserts on how the poll reacts.
 
 CHARGE_SENTINEL = object()
+# A real Status: status() attaches a charging frame with dataclasses.replace, so
+# status_time identifies it across that copy.
+STATUS_TIME = 1_700_000_000
+STATUS_SENTINEL = Status(status_time=STATUS_TIME)
 
 
 def _client():
@@ -219,18 +224,14 @@ def _client():
     return client
 
 
-def _run_charge_status(monkeypatch, responses, *, attempts=3):
-    """Run charge_status() against a scripted list of (dispatcher, charge) frames.
+def _patch_poll(monkeypatch, client, queued, event_ids, logins, attempts, *, widen):
+    """Wire a client's poll loop to a scripted frame list, no HTTP.
 
-    Returns (result, event_ids, logins) where event_ids are the poll cursors the
-    loop sent and logins counts the re-login calls it made.
+    ``widen`` adapts each scripted entry into the ``(dispatcher, status, charge)``
+    triple the loop decodes; ``parse_status`` is stubbed to pass its payload
+    through so a status frame can be a bare sentinel.
     """
     from mg_ismart_india_client import client as client_mod
-
-    client = _client()
-    event_ids: list[int] = []
-    logins: list[str] = []
-    queued = list(responses)
 
     async def post(event_id, _label):
         event_ids.append(event_id)
@@ -246,14 +247,65 @@ def _run_charge_status(monkeypatch, responses, *, attempts=3):
     monkeypatch.setattr(client_mod.asyncio, "sleep", no_sleep)
     monkeypatch.setattr(client, "_post_status_frame", post)
     monkeypatch.setattr(client, "login", login)
+    monkeypatch.setattr(client_mod, "parse_status", lambda payload: payload)
     monkeypatch.setattr(
-        client_mod,
-        "decode_charge_status_response",
-        lambda _text: queued.pop(0),
+        client_mod, "decode_status_and_charge", lambda _text: widen(queued.pop(0))
     )
 
+
+def _run_charge_status(monkeypatch, responses, *, attempts=3):
+    """Run charge_status() against a scripted list of (dispatcher, charge) frames.
+
+    Returns (result, event_ids, logins) where event_ids are the poll cursors the
+    loop sent and logins counts the re-login calls it made.
+    """
+    client = _client()
+    event_ids: list[int] = []
+    logins: list[str] = []
+    # Scripts carry (dispatcher, charge); widen to (dispatcher, None-status, charge).
+    _patch_poll(
+        monkeypatch,
+        client,
+        list(responses),
+        event_ids,
+        logins,
+        attempts,
+        widen=lambda entry: (entry[0], None, entry[1]),
+    )
     result = asyncio.run(client.charge_status())
     return result, event_ids, logins
+
+
+def _drive_status(monkeypatch, client, responses, *, attempts=3, include_charge=True):
+    """Run status() on an existing client against scripted frames.
+
+    Takes the client rather than building one so a test can drive several polls
+    through the same instance, the way a caller refreshing on a schedule does.
+    """
+    event_ids: list[int] = []
+    logins: list[str] = []
+    _patch_poll(
+        monkeypatch,
+        client,
+        list(responses),
+        event_ids,
+        logins,
+        attempts,
+        widen=lambda entry: entry,
+    )
+    result = asyncio.run(client.status(include_charge=include_charge))
+    return result, event_ids, logins
+
+
+def _run_status(monkeypatch, responses, *, attempts=3, include_charge=True):
+    """Run status() against scripted (dispatcher, status, charge) frames."""
+    return _drive_status(
+        monkeypatch,
+        _client(),
+        responses,
+        attempts=attempts,
+        include_charge=include_charge,
+    )
 
 
 def test_charge_status_returns_first_charging_frame(monkeypatch):
@@ -326,3 +378,84 @@ def test_charge_status_raises_on_unexpected_result(monkeypatch):
     # an unknown result code must surface rather than being reported as "not charging"
     with pytest.raises(MgIndiaApiError, match="result 9"):
         _run_charge_status(monkeypatch, [({"result": 9}, None)])
+
+
+# --- status(include_charge=...) combined poll -------------------------------
+
+
+def test_status_with_charge_collects_both_from_one_loop(monkeypatch):
+    # the status frame and the charging frame arrive on separate polls of the same
+    # stream; one loop gathers both and returns them on the one Status
+    result, event_ids, logins = _run_status(
+        monkeypatch,
+        [
+            ({"result": 4, "eventID": 5}, None, None),
+            ({"result": 0, "eventID": 5}, STATUS_SENTINEL, None),
+            ({"result": 0, "eventID": 5}, None, CHARGE_SENTINEL),
+        ],
+    )
+
+    assert result.status_time == STATUS_TIME
+    assert result.charge is CHARGE_SENTINEL
+    assert event_ids == [0, 5, 5]
+    assert logins == []
+
+
+def test_status_with_charge_returns_status_when_no_charge_frame(monkeypatch):
+    # status arrives but no charging frame within budget: charge is None, no raise
+    # (an idle/unplugged or charging-disabled account is a routine outcome here)
+    result, _event_ids, _logins = _run_status(
+        monkeypatch,
+        [({"result": 0, "eventID": 1}, STATUS_SENTINEL, None)]
+        + [({"result": 4, "eventID": 1}, None, None) for _ in range(2)],
+    )
+
+    assert result.status_time == STATUS_TIME
+    assert result.charge is None
+
+
+def test_status_with_charge_raises_on_later_error_result(monkeypatch):
+    # A requested charging frame has not arrived, so a later protocol failure must
+    # not be hidden by the status frame collected earlier in the same poll stream.
+    with pytest.raises(MgIndiaApiError, match="result 9"):
+        _run_status(
+            monkeypatch,
+            [
+                ({"result": 0, "eventID": 1}, STATUS_SENTINEL, None),
+                ({"result": 9, "eventID": 1}, None, None),
+            ],
+        )
+
+
+def test_status_raises_when_status_never_arrives(monkeypatch):
+    with pytest.raises(MgIndiaApiError, match="was not ready after polling"):
+        _run_status(
+            monkeypatch,
+            [({"result": 4, "eventID": 1}, None, None) for _ in range(3)],
+        )
+
+
+def test_status_without_charge_returns_on_the_status_frame(monkeypatch):
+    # the default path must not spend the rest of the budget waiting for a
+    # charging frame: one poll in, status out
+    result, event_ids, _logins = _run_status(
+        monkeypatch,
+        [({"result": 0, "eventID": 1}, STATUS_SENTINEL, None)],
+        include_charge=False,
+    )
+
+    assert result.status_time == STATUS_TIME
+    assert result.charge is None
+    assert event_ids == [0]
+
+
+def test_status_without_charge_still_keeps_a_frame_that_arrives(monkeypatch):
+    # include_charge governs how long the loop waits, not what it collects
+    result, event_ids, _logins = _run_status(
+        monkeypatch,
+        [({"result": 0, "eventID": 1}, STATUS_SENTINEL, CHARGE_SENTINEL)],
+        include_charge=False,
+    )
+
+    assert result.charge is CHARGE_SENTINEL
+    assert event_ids == [0]

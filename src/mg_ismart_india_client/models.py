@@ -59,8 +59,6 @@ class Vehicle:
     """Exterior colour as reported by the API, e.g. "Clay Beige"."""
     series: str | None = None
     """Raw API model/series code (e.g. "EQ100"), needed for per-model asset lookups (images, CDN paths). Distinct from :attr:`model`."""
-
-
 @dataclass(slots=True)
 class Capabilities:
     climate: bool = False
@@ -74,6 +72,12 @@ class Capabilities:
 
 @dataclass(slots=True)
 class Status:
+    """Vehicle state from one TAP poll.
+
+    Primarily the decoded 195-byte full-status frame, with two satellites the
+    same poll can carry: :attr:`gps` and :attr:`charge`.
+    """
+
     status_time: int | None = None
     locked: bool | None = None
     driver_door_open: bool | None = None
@@ -104,6 +108,22 @@ class Status:
     handbrake: bool | None = None
     raw: dict[str, Any] = field(default_factory=dict)
     gps: GpsPosition | None = None
+    charge: ChargeStatus | None = None
+    """EV charging status collected from the same poll, or ``None``.
+
+    The 195-byte full-status frame and the 63-byte charging frame ride the same
+    TAP poll stream, interleaved, so one poll can yield both — sparing a caller
+    that needs both each refresh a second, redundant poll of the same endpoint.
+    :meth:`~mg_ismart_india_client.client.MgIndiaClient.status` waits for the
+    charging frame only when asked (``include_charge=True``), but attaches one
+    that happens to arrive either way.
+
+    ``None`` is a routine outcome, not an error: a non-EV, ``include_charge``
+    left off, or a poll budget that expired before a charging frame arrived.
+
+    Carries its own :attr:`ChargeStatus.status_time`, which the vehicle produces
+    independently of :attr:`status_time` here; the two may differ.
+    """
 
 
 @dataclass(slots=True)
