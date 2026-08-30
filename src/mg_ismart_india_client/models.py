@@ -46,43 +46,6 @@ class GpsPosition:
         )
 
 
-@dataclass(frozen=True, slots=True)
-class SubaccountGrant:
-    """One car-sharing grant from the ``userVinList`` entry.
-
-    On a **secondary** account, the entry's ``subaccountInfo`` object is this
-    account's own grant (parsed into :attr:`Vehicle.subaccount_grant`). On the
-    **primary** account, the entry's ``subaccountList`` holds one of these per
-    account the owner has shared the car with (parsed into
-    :attr:`Vehicle.subaccounts`). Fields are copied verbatim from the API;
-    :attr:`raw` keeps the whole object for anything not surfaced here.
-    """
-
-    subaccount_id: int | None = None
-    subscriber_id: int | None = None
-    authorized_subscriber_id: int | None = None
-    user_name: str | None = None
-    """Display name on the grant (the shared-with user, PII)."""
-    user_account: str | None = None
-    """Account identifier on the grant, e.g. a phone number (PII)."""
-    authorization_card_type: int | None = None
-    """Permission tier of the grant; code meanings unconfirmed."""
-    location_authorization: int | None = None
-    """Whether the grant includes location access (1 = yes in captures)."""
-    validity_start_time: int | None = None
-    """Grant validity start, Unix epoch seconds."""
-    validity_end_time: int | None = None
-    """Grant validity end, Unix epoch seconds; 0 = open-ended in captures."""
-    operation_type: int | None = None
-    status: int | None = None
-    create_date: int | None = None
-    """Grant creation time, Unix epoch milliseconds."""
-    vin: str | None = None
-    raw: dict[str, Any] = field(default_factory=dict)
-    """The full ``subaccountInfo``/``subaccountList`` object as returned, for
-    fields not surfaced as attributes above."""
-
-
 @dataclass(slots=True)
 class Vehicle:
     vin: str
@@ -96,46 +59,6 @@ class Vehicle:
     """Exterior colour as reported by the API, e.g. "Clay Beige"."""
     series: str | None = None
     """Raw API model/series code (e.g. "EQ100"), needed for per-model asset lookups (images, CDN paths). Distinct from :attr:`model`."""
-    is_subaccount: bool | None = None
-    """Whether **this** account is a secondary (granted-access) account for this
-    vehicle.
-
-    ``False`` on the primary/owner account (the one the car was first bound to);
-    ``True`` on a secondary account the owner has shared the car with. ``None``
-    when the API did not report it. Decoded from the ``isSubaccount`` flag the
-    ``userVinList`` entry carries, which is the reliable primary-vs-secondary
-    discriminator (a secondary entry additionally carries a ``subaccountInfo``
-    grant object; a primary entry carries a ``subaccountList``). Use
-    :attr:`is_primary_account` for the inverse."""
-    is_current_vehicle: bool | None = None
-    """Whether the API marks this as the account's currently-selected vehicle
-    (``isCurrentVehicle``)."""
-    is_activated: bool | None = None
-    """Whether the vehicle is activated on this account (``isActivate``)."""
-    bind_time: int | None = None
-    """When the vehicle was bound to this account, Unix epoch **milliseconds**
-    (``bindTime``). Differs per account: the owner's is the original binding, a
-    secondary's is when access was granted."""
-    tbox_sim_no: str | None = None
-    """T-Box embedded-SIM number (``tboxSimNo``); telemetry SIM, not the user's
-    phone."""
-    subaccount_grant: SubaccountGrant | None = None
-    """This account's own grant, present only on a **secondary** account
-    (``subaccountInfo``); ``None`` on the owner account."""
-    subaccounts: list[SubaccountGrant] = field(default_factory=list)
-    """Accounts the owner has shared this car with, present only on the
-    **primary** account (``subaccountList``); empty on a secondary account and
-    when nothing has been shared."""
-
-    @property
-    def is_primary_account(self) -> bool | None:
-        """``True`` on the owner account, ``False`` on a secondary account.
-
-        The inverse of :attr:`is_subaccount`; ``None`` when the role is unknown.
-        """
-        return None if self.is_subaccount is None else not self.is_subaccount
-
-
 @dataclass(slots=True)
 class Capabilities:
     climate: bool = False
@@ -147,7 +70,7 @@ class Capabilities:
     window_param_ids: tuple[int, ...] = ()
 
 
-@dataclass(frozen=True, slots=True)
+@dataclass(slots=True)
 class Status:
     """Vehicle state from one TAP poll.
 
@@ -196,8 +119,7 @@ class Status:
     that happens to arrive either way.
 
     ``None`` is a routine outcome, not an error: a non-EV, ``include_charge``
-    left off, a poll budget that expired before a charging frame arrived, or a
-    secondary account whose charging telemetry is disabled server-side.
+    left off, or a poll budget that expired before a charging frame arrived.
 
     Carries its own :attr:`ChargeStatus.status_time`, which the vehicle produces
     independently of :attr:`status_time` here; the two may differ.

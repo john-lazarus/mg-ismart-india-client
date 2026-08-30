@@ -12,7 +12,6 @@ OTARVMVehicleChargingStatusResp recovered from the app.
 from __future__ import annotations
 
 import asyncio
-import logging
 
 import asn1tools
 import pytest
@@ -22,7 +21,6 @@ from mg_ismart_india_client import (
     MgIndiaApiError,
     MgIndiaClient,
     Status,
-    Vehicle,
 )
 from mg_ismart_india_client.tap import (
     _decode_v21,
@@ -208,13 +206,12 @@ def test_wrong_length_app_that_fails_asn_decode_returns_none():
 
 CHARGE_SENTINEL = object()
 # A real Status: status() attaches a charging frame with dataclasses.replace, so
-# the scripted status frame has to be the frozen dataclass and not a bare marker.
 # status_time identifies it across that copy.
 STATUS_TIME = 1_700_000_000
 STATUS_SENTINEL = Status(status_time=STATUS_TIME)
 
 
-def _client(vehicle=None):
+def _client():
     client = MgIndiaClient(
         object(),
         "9876543210",
@@ -224,7 +221,6 @@ def _client(vehicle=None):
     )
     client.uid = "uid"
     client.token = "token"
-    client.vehicle = vehicle
     return client
 
 
@@ -257,13 +253,13 @@ def _patch_poll(monkeypatch, client, queued, event_ids, logins, attempts, *, wid
     )
 
 
-def _run_charge_status(monkeypatch, responses, *, attempts=3, vehicle=None):
+def _run_charge_status(monkeypatch, responses, *, attempts=3):
     """Run charge_status() against a scripted list of (dispatcher, charge) frames.
 
     Returns (result, event_ids, logins) where event_ids are the poll cursors the
     loop sent and logins counts the re-login calls it made.
     """
-    client = _client(vehicle)
+    client = _client()
     event_ids: list[int] = []
     logins: list[str] = []
     # Scripts carry (dispatcher, charge); widen to (dispatcher, None-status, charge).
@@ -301,13 +297,11 @@ def _drive_status(monkeypatch, client, responses, *, attempts=3, include_charge=
     return result, event_ids, logins
 
 
-def _run_status(
-    monkeypatch, responses, *, attempts=3, vehicle=None, include_charge=True
-):
+def _run_status(monkeypatch, responses, *, attempts=3, include_charge=True):
     """Run status() against scripted (dispatcher, status, charge) frames."""
     return _drive_status(
         monkeypatch,
-        _client(vehicle),
+        _client(),
         responses,
         attempts=attempts,
         include_charge=include_charge,
@@ -386,30 +380,6 @@ def test_charge_status_raises_on_unexpected_result(monkeypatch):
         _run_charge_status(monkeypatch, [({"result": 9}, None)])
 
 
-def test_charge_status_unavailable_hints_at_subaccount(monkeypatch):
-    # on a secondary account, the exhausted-budget error names the likely cause
-    vehicle = Vehicle("VIN12345678901234", "name", is_subaccount=True)
-    with pytest.raises(ChargingStatusUnavailable, match="secondary/shared account"):
-        _run_charge_status(
-            monkeypatch,
-            [({"result": 4, "eventID": i}, None) for i in range(1, 4)],
-            vehicle=vehicle,
-        )
-
-
-def test_charge_status_warns_on_subaccount(monkeypatch, caplog):
-    # the full poll is attempted for a subaccount; only its empty result is
-    # explained afterwards, for a caller that swallows the exception
-    vehicle = Vehicle("VIN12345678901234", "name", is_subaccount=True)
-    with caplog.at_level(logging.WARNING), pytest.raises(ChargingStatusUnavailable):
-        _run_charge_status(
-            monkeypatch,
-            [({"result": 4, "eventID": i}, None) for i in range(1, 4)],
-            vehicle=vehicle,
-        )
-    assert any("secondary" in r.message for r in caplog.records)
-
-
 # --- status(include_charge=...) combined poll -------------------------------
 
 
@@ -444,20 +414,17 @@ def test_status_with_charge_returns_status_when_no_charge_frame(monkeypatch):
     assert result.charge is None
 
 
-def test_status_with_charge_keeps_a_status_frame_past_an_error_result(monkeypatch):
-    # the status arrived and decoded; a later frame on the shared stream carrying
-    # a non-pending result must not throw it away. Without include_charge the loop
-    # returns before ever seeing that frame, so only this path can regress.
-    result, _event_ids, _logins = _run_status(
-        monkeypatch,
-        [
-            ({"result": 0, "eventID": 1}, STATUS_SENTINEL, None),
-            ({"result": 9, "eventID": 1}, None, None),
-        ],
-    )
-
-    assert result.status_time == STATUS_TIME
-    assert result.charge is None
+def test_status_with_charge_raises_on_later_error_result(monkeypatch):
+    # A requested charging frame has not arrived, so a later protocol failure must
+    # not be hidden by the status frame collected earlier in the same poll stream.
+    with pytest.raises(MgIndiaApiError, match="result 9"):
+        _run_status(
+            monkeypatch,
+            [
+                ({"result": 0, "eventID": 1}, STATUS_SENTINEL, None),
+                ({"result": 9, "eventID": 1}, None, None),
+            ],
+        )
 
 
 def test_status_raises_when_status_never_arrives(monkeypatch):
@@ -492,68 +459,3 @@ def test_status_without_charge_still_keeps_a_frame_that_arrives(monkeypatch):
 
     assert result.charge is CHARGE_SENTINEL
     assert event_ids == [0]
-
-
-def test_status_with_charge_warns_on_subaccount_only_when_none_arrives(
-    monkeypatch, caplog
-):
-    # the role never gates the request: the budget is spent asking, and the
-    # warning explains the empty result afterwards
-    vehicle = Vehicle("VIN12345678901234", "name", is_subaccount=True)
-    with caplog.at_level(logging.WARNING):
-        result, event_ids, _logins = _run_status(
-            monkeypatch,
-            [({"result": 0, "eventID": 1}, STATUS_SENTINEL, None)]
-            + [({"result": 4, "eventID": 1}, None, None) for _ in range(2)],
-            vehicle=vehicle,
-        )
-
-    assert result.charge is None
-    assert event_ids == [0, 1, 1]
-    assert any("secondary" in r.message for r in caplog.records)
-
-
-def test_status_with_charge_serves_a_subaccount_that_gets_a_frame(monkeypatch, caplog):
-    # if the grant is ever enabled server-side the frame arrives and is returned
-    # like any other -- no role gate to remove, and no warning left standing
-    vehicle = Vehicle("VIN12345678901234", "name", is_subaccount=True)
-    with caplog.at_level(logging.WARNING):
-        result, _event_ids, _logins = _run_status(
-            monkeypatch,
-            [
-                ({"result": 4, "eventID": 1}, None, None),
-                ({"result": 0, "eventID": 1}, STATUS_SENTINEL, None),
-                ({"result": 0, "eventID": 1}, None, CHARGE_SENTINEL),
-            ],
-            vehicle=vehicle,
-        )
-
-    assert result.charge is CHARGE_SENTINEL
-    assert not [r for r in caplog.records if "secondary" in r.message]
-
-
-def test_subaccount_charge_warning_is_logged_on_every_empty_poll(monkeypatch, caplog):
-    # not deduplicated: the condition stays in the log for as long as it holds,
-    # and stops on its own the poll a frame finally arrives
-    vehicle = Vehicle("VIN12345678901234", "name", is_subaccount=True)
-    empty = [({"result": 0, "eventID": 1}, STATUS_SENTINEL, None)] + [
-        ({"result": 4, "eventID": 1}, None, None) for _ in range(2)
-    ]
-
-    def warnings_for(responses, client):
-        caplog.clear()
-        with caplog.at_level(logging.WARNING):
-            _drive_status(monkeypatch, client, responses)
-        return [r for r in caplog.records if "secondary" in r.message]
-
-    client = _client(vehicle)
-    assert len(warnings_for(empty, client)) == 1
-    assert len(warnings_for(empty, client)) == 1
-    assert len(warnings_for(empty, client)) == 1
-    # the grant is enabled and a frame arrives: nothing left to explain
-    assert (
-        warnings_for(
-            [({"result": 0, "eventID": 1}, STATUS_SENTINEL, CHARGE_SENTINEL)], client
-        )
-        == []
-    )

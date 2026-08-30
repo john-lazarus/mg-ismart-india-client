@@ -33,12 +33,8 @@ async with aiohttp.ClientSession() as session:
     # status.charge (None when none arrived -- routine, not an error), and
     # saves the second round trip a separate charge_status() would cost.
     #
-    # Only set this where a charging frame is actually expected. The loop waits
-    # for one, so when none comes it spends the full budget -- up to 10 POSTs
-    # and ~13.5s -- on EVERY call. On an ICE vehicle, or a secondary account
-    # whose charging telemetry is disabled server-side, that is the guaranteed
-    # cost of every refresh, for nothing. Gate it on a known-EV flag rather
-    # than turning it on by default.
+    # Only set this where a charging frame is expected. The loop waits for one,
+    # so a vehicle that never sends it spends the full poll budget on every call.
     status = await client.status(include_charge=True)
     print(status.charge)
 ```
