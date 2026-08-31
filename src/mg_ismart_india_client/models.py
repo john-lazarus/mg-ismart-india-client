@@ -72,10 +72,12 @@ class Capabilities:
 
 @dataclass(slots=True)
 class Status:
-    """Vehicle state from one TAP poll.
+    """Vehicle state from a TAP status poll.
 
-    Primarily the decoded 195-byte full-status frame, with two satellites the
-    same poll can carry: :attr:`gps` and :attr:`charge`.
+    Primarily the decoded 195-byte full-status frame (which also carries
+    :attr:`gps`), plus :attr:`charge` when the caller asked
+    :meth:`~mg_ismart_india_client.client.MgIndiaClient.status` to also fetch the
+    charging frame (see :attr:`charge`).
     """
 
     status_time: int | None = None
@@ -109,17 +111,18 @@ class Status:
     raw: dict[str, Any] = field(default_factory=dict)
     gps: GpsPosition | None = None
     charge: ChargeStatus | None = None
-    """EV charging status collected from the same poll, or ``None``.
+    """EV charging status, or ``None``.
 
-    The 195-byte full-status frame and the 63-byte charging frame ride the same
-    TAP poll stream, interleaved, so one poll can yield both — sparing a caller
-    that needs both each refresh a second, redundant poll of the same endpoint.
-    :meth:`~mg_ismart_india_client.client.MgIndiaClient.status` waits for the
-    charging frame only when asked (``include_charge=True``), but attaches one
-    that happens to arrive either way.
+    The 63-byte charging frame answers a different TAP request than the 195-byte
+    full status, so it is fetched only when
+    :meth:`~mg_ismart_india_client.client.MgIndiaClient.status` is asked to
+    (``include_charge=True``), which polls that charge request after the status
+    one in the same call and attaches the frame here. It stays ``None`` otherwise.
 
-    ``None`` is a routine outcome, not an error: a non-EV, ``include_charge``
-    left off, or a poll budget that expired before a charging frame arrived.
+    ``None`` is a routine outcome, not an error: ``include_charge`` left off, a
+    non-EV, an idle/unplugged vehicle, a secondary account whose charging is
+    disabled server-side, or a poll budget that expired before a charging frame
+    arrived.
 
     Carries its own :attr:`ChargeStatus.status_time`, which the vehicle produces
     independently of :attr:`status_time` here; the two may differ.
