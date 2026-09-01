@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import json
 import time
+from collections.abc import Awaitable, Callable
 from dataclasses import replace
 from typing import Any
 from urllib.parse import urlencode
@@ -38,6 +39,7 @@ from .tap import (
     decode_control_response,
     decode_pin_response,
     decode_status_and_charge,
+    encode_charge_status_request,
     encode_control_request,
     encode_pin_request,
     encode_status_request,
@@ -58,6 +60,14 @@ STATUS_DELAY = 1.5
 # the session is no longer valid and the caller must log in again.
 STATUS_RESULT_PENDING = (0, 4, 6)
 STATUS_RESULT_SESSION_INVALID = 2
+# The charge request answers result 5 when the server will not serve the charging
+# frame to this account -- observed live on a secondary (shared) account, whose
+# charging telemetry is gated server-side, while the owner account gets result 0
+# and the frame. Treated as "charging unavailable", not a protocol fault: the
+# charge poll returns None (so charge_status() raises ChargingStatusUnavailable and
+# status(include_charge=True) simply leaves Status.charge None) rather than
+# aborting the whole call.
+CHARGE_RESULT_UNAVAILABLE = (5,)
 TYRE_PSI_PER_UNIT = 0.2
 LOGIN_DISPATCHER_TEMPLATE_HEX = (
     "11005600882c60c183060c183060c183060c183060c183060c183060c183060c183060c183"
@@ -532,19 +542,8 @@ class MgIndiaClient:
         self.capabilities = discover_capabilities(payloads)
         return self.capabilities
 
-    async def _post_status_frame(self, event_id: int, error_label: str) -> str:
-        """POST a status-request frame for the given event cursor.
-
-        Shared by :meth:`status` and :meth:`charge_status`, which poll the same TAP
-        endpoint for different frame shapes (the full status vs. the charging
-        frame).
-        """
-        body = encode_status_request(
-            self.uid or "0" * 50,
-            self.token or "0" * 40,
-            self.vin or "",
-            event_id,
-        )
+    async def _post_tap_frame(self, body: str, error_label: str) -> str:
+        """POST a pre-built TAP frame to the status endpoint, returning the body."""
         headers = {
             "User-Agent": USER_AGENT,
             "Content-Type": "text/plain",
@@ -561,18 +560,113 @@ class MgIndiaClient:
                 raise MgIndiaApiError(f"{error_label} failed: HTTP {response.status}")
         return text
 
+    async def _post_status_frame(self, event_id: int, error_label: str) -> str:
+        """POST the messageID=1 status request (the 195-byte full-status frame)."""
+        body = encode_status_request(
+            self.uid or "0" * 50,
+            self.token or "0" * 40,
+            self.vin or "",
+            event_id,
+        )
+        return await self._post_tap_frame(body, error_label)
+
+    async def _post_charge_frame(self, event_id: int, error_label: str) -> str:
+        """POST the messageID=8 charge request (the 63-byte charging frame).
+
+        A distinct request from the status one: the status request never elicits
+        the charging frame (verified from captured traffic and live), so charging
+        is polled with this separate request.
+        """
+        body = encode_charge_status_request(
+            self.uid or "0" * 50,
+            self.token or "0" * 40,
+            self.vin or "",
+            event_id,
+        )
+        return await self._post_tap_frame(body, error_label)
+
+    async def _poll_request(
+        self,
+        post: Callable[[int, str], Awaitable[str]],
+        want: Callable[[dict[str, Any] | None, ChargeStatus | None], Any],
+        label: str,
+        *,
+        unavailable_results: tuple[int, ...] = (),
+        tolerate_framing_errors: bool = False,
+    ) -> Any:
+        """Poll one TAP request type to completion.
+
+        ``post(event_id, label)`` sends the request; ``want(status, charge)`` picks
+        the frame this poll is after from the decoded response, returning ``None``
+        until it arrives. Advances the event cursor from each response and honours
+        the poll budget, re-logging in once on an invalid session. A dispatcher
+        result in ``unavailable_results`` means the server will not serve this frame
+        to the account (e.g. charging that is gated to the owner) and returns
+        ``None`` rather than raising. ``tolerate_framing_errors`` retries malformed
+        responses within the poll budget; it is only enabled for the charge request,
+        where this transient response has been observed.
+
+        :returns: the wanted frame, or ``None`` if the budget expired without it or
+            the server declined to serve it.
+        :raises MgIndiaApiError: on any other non-pending dispatcher result, or a
+            session that stays invalid across a re-login.
+        :raises ValueError: on malformed responses unless framing-error tolerance is
+            enabled for this request.
+        """
+        for login_attempt in range(2):
+            event_id = 0
+            for attempt in range(STATUS_ATTEMPTS):
+                text = await post(event_id, label)
+                try:
+                    dispatcher, status_payload, charge = decode_status_and_charge(
+                        text
+                    )
+                except ValueError:
+                    if not tolerate_framing_errors:
+                        raise
+                    # An occasional malformed/empty framing (seen on a cold charge
+                    # poll) is a transient blip, not a fault: keep polling within
+                    # the budget rather than aborting the whole call.
+                    if attempt < STATUS_ATTEMPTS - 1:
+                        await asyncio.sleep(STATUS_DELAY)
+                    continue
+                frame = want(status_payload, charge)
+                if frame is not None:
+                    return frame
+                result = dispatcher.get("result", 0)
+                if result == STATUS_RESULT_SESSION_INVALID:
+                    if login_attempt == 0:
+                        await self.login()
+                        break
+                    raise MgIndiaApiError(f"TAP {label.lower()} session is invalid")
+                if result in unavailable_results:
+                    return None
+                if result not in STATUS_RESULT_PENDING:
+                    raise MgIndiaApiError(f"{label} failed: result {result}")
+                event_id = dispatcher.get("eventID", event_id)
+                if attempt < STATUS_ATTEMPTS - 1:
+                    await asyncio.sleep(STATUS_DELAY)
+            else:
+                # Budget spent on a healthy session without the frame.
+                return None
+        return None
+
     async def _poll_status_and_charge(
         self, *, need_status: bool, need_charge: bool, label: str
     ) -> tuple[Status | None, ChargeStatus | None]:
-        """Poll the TAP endpoint once, collecting the status and/or charge frame.
+        """Poll for the status and/or charging frame, collecting what was asked.
 
-        The 195-byte full-status frame and the 63-byte charging frame ride the same
-        poll stream, interleaved, so one loop can gather both. ``need_status`` /
-        ``need_charge`` set the stopping condition: the loop returns as soon as
-        every requested frame has been seen, and otherwise runs out the poll
-        budget. Either element of the returned pair is ``None`` when that frame did
-        not arrive; the callers turn a missing *required* frame into their own
-        error, so this stays the single place the poll logic lives.
+        The 195-byte full-status frame and the 63-byte charging frame answer
+        different TAP requests (the messageID=1 status request vs. the messageID=8
+        charge request), and the vehicle serves a single outstanding request per
+        session -- so the two cannot be interleaved: a charge request sent mid-poll
+        cancels the status job, and vice versa (matching how the app polls one to
+        completion before the other). Each wanted frame is therefore polled to
+        completion in turn -- the status request first, then the charge request --
+        each on its own event cursor and poll budget. Either element of the
+        returned pair is ``None`` when that frame did not arrive; the callers turn a
+        missing *required* frame into their own error, so this stays the single
+        place the poll orchestration lives.
 
         :raises MgIndiaApiError: on a non-pending dispatcher result or a session
             that stays invalid across a re-login -- protocol/session faults, never
@@ -584,64 +678,46 @@ class MgIndiaClient:
             await self.vehicles()
         status_obj: Status | None = None
         charge_obj: ChargeStatus | None = None
-        for login_attempt in range(2):
-            event_id = 0
-            for attempt in range(STATUS_ATTEMPTS):
-                text = await self._post_status_frame(event_id, label)
-                dispatcher, status_payload, charge = decode_status_and_charge(text)
-                if status_payload is not None and status_obj is None:
-                    status_obj = parse_status(status_payload)
-                if charge is not None and charge_obj is None:
-                    charge_obj = charge
-                result = dispatcher.get("result", 0)
-                if result == STATUS_RESULT_SESSION_INVALID:
-                    if login_attempt == 0:
-                        await self.login()
-                        break
-                    raise MgIndiaApiError(f"TAP {label.lower()} session is invalid")
-                if result not in STATUS_RESULT_PENDING:
-                    raise MgIndiaApiError(f"{label} failed: result {result}")
-                if (status_obj is not None or not need_status) and (
-                    charge_obj is not None or not need_charge
-                ):
-                    return status_obj, charge_obj
-                event_id = dispatcher.get("eventID", event_id)
-                if attempt < STATUS_ATTEMPTS - 1:
-                    await asyncio.sleep(STATUS_DELAY)
-            else:
-                # Budget spent on a healthy session; return whatever was collected.
-                return status_obj, charge_obj
-        # Only reachable if the inner loop broke on both passes, which it cannot:
-        # it breaks solely for a session refresh on login_attempt 0, and the
-        # second pass raises instead. Kept as a raise rather than a return so a
-        # future edit that does reach it reports a session fault as one -- a
-        # silent empty return here would surface from charge_status() as
-        # ChargingStatusUnavailable, which promises the opposite.
-        raise MgIndiaApiError(f"{label} failed after token refresh")
+        if need_status:
+            payload = await self._poll_request(
+                self._post_status_frame, lambda status, _charge: status, label
+            )
+            if payload is None:
+                # A current status frame is required before charging is polled.
+                return None, None
+            status_obj = parse_status(payload)
+        if need_charge:
+            charge_obj = await self._poll_request(
+                self._post_charge_frame,
+                lambda _status, charge: charge,
+                label,
+                unavailable_results=CHARGE_RESULT_UNAVAILABLE,
+                tolerate_framing_errors=True,
+            )
+        return status_obj, charge_obj
 
     async def status(self, *, include_charge: bool = False) -> Status:
         """Full vehicle status, optionally with the EV charging frame attached.
 
-        The 195-byte full-status frame and the 63-byte charging frame ride the
-        same TAP poll stream, interleaved, so one poll loop can collect both.
+        The full status and the charging frame answer different TAP requests, so
+        ``include_charge`` decides whether the charge request is issued at all:
 
-        ``include_charge`` decides only how long the loop is willing to *wait*:
-        left ``False`` (the default) it returns the moment the status frame
-        arrives, which is the cheap path an ICE vehicle or a status-only refresh
-        wants. Set it ``True`` and the loop waits out the poll budget for a
-        charging frame too, which costs the same as :meth:`charge_status` while
-        yielding the status for free -- the efficient path for an EV caller that
-        needs both each refresh (e.g. Home Assistant). Either way a charging
-        frame that happens to arrive is attached, so
-        :attr:`~..models.Status.charge` can be set even with ``include_charge``
-        off.
+        - ``False`` (the default): poll only the status request and return the
+          moment the status frame arrives -- the cheap path an ICE vehicle or a
+          status-only refresh wants. :attr:`~..models.Status.charge` is always
+          ``None`` here (the charge request is never sent).
+        - ``True``: after the status frame, also poll the charge request in the
+          same call and attach the charging frame when it arrives -- the path an
+          EV caller that needs both each refresh (e.g. Home Assistant) wants,
+          without a second, separate call.
 
         :attr:`~..models.Status.charge` is ``None`` when no charging frame
-        arrived -- a routine outcome (``include_charge`` off, a non-EV, or an
-        expired budget), not an error. Use :meth:`charge_status` when a missing
+        arrived -- a routine outcome (``include_charge`` off, a non-EV, an
+        idle/unplugged vehicle, or a secondary account whose charging is disabled
+        server-side), not an error. Use :meth:`charge_status` when a missing
         charging frame should raise instead.
 
-        :param include_charge: wait out the poll budget for a charging frame.
+        :param include_charge: also poll for and attach the charging frame.
         :returns: the vehicle status, with :attr:`~..models.Status.charge` set
             when a charging frame was seen.
         :raises MgIndiaApiError: if the status frame never arrives, or on session
@@ -659,12 +735,12 @@ class MgIndiaClient:
     async def charge_status(self) -> ChargeStatus:
         """EV charging status (the 63-byte app-id 511 frame).
 
-        The charging frame is interleaved with the ordinary status frames on the
-        same endpoint; the exact request that forces it is not yet known, so this
-        polls and returns the first charging frame it sees. When both the status
-        and the charging frame are wanted (e.g. a Home Assistant refresh), prefer
-        ``status(include_charge=True)``, which collects both from a single poll
-        instead of polling this endpoint twice.
+        Polls the dedicated charge request (messageID=8; see
+        :func:`~mg_ismart_india_client.tap.encode_charge_status_request`) and
+        returns the first charging frame it sees. When both the status and the
+        charging frame are wanted (e.g. a Home Assistant refresh), prefer
+        ``status(include_charge=True)``, which gathers both in one call (status
+        first, then charge) rather than a separate status call.
 
         "Plugged in but not charging" is a real frame the vehicle sends, so it
         comes back as an ordinary :class:`~mg_ismart_india_client.models.ChargeStatus`

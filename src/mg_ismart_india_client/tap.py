@@ -113,6 +113,32 @@ def encode_status_request(uid: str, token: str, vin: str, event_id: int) -> str:
     return _frame_v21(_dispatcher(uid, token, vin, STATUS_APP_ID, app, event_id), app)
 
 
+# The 63-byte EV charging frame answers a DIFFERENT request than the 195-byte full
+# status: messageID 8 with an empty application payload (applicationDataLength 0),
+# not the messageID 1 / OTARVMVehicleStatusReq status request. This was read off
+# captured app traffic (mid=8 -> 63-byte charge frame; mid=1 -> 195-byte status;
+# neither request ever returned the other frame) and confirmed live. The status
+# request never elicits the charging frame, so charging must be polled with this.
+CHARGE_STATUS_MESSAGE_ID = 8
+
+
+def encode_charge_status_request(
+    uid: str, token: str, vin: str, event_id: int
+) -> str:
+    return _frame_v21(
+        _dispatcher(
+            uid,
+            token,
+            vin,
+            STATUS_APP_ID,
+            b"",
+            event_id,
+            msg_id=CHARGE_STATUS_MESSAGE_ID,
+        ),
+        b"",
+    )
+
+
 def encode_control_request(
     uid: str,
     token: str,
@@ -335,11 +361,12 @@ def decode_status_and_charge(
 ) -> tuple[dict[str, Any], dict[str, Any] | None, ChargeStatus | None]:
     """Decode one TAP frame into its dispatcher, full status, and charging status.
 
-    A single TAP poll stream interleaves the 195-byte full-status frame
-    (``OTARVMVehicleStatusResp513``) and the 63-byte charging frame, so a caller
-    that wants both can collect them from one loop instead of polling the endpoint
-    twice. This decodes whichever shape a given response carries without raising on
-    the other: the status dict is ``None`` unless the frame is the full status, the
+    The 195-byte full-status frame (``OTARVMVehicleStatusResp513``) and the
+    63-byte charging frame answer different requests (the status request vs. the
+    :func:`encode_charge_status_request` charge request), so any one response holds
+    at most one of them. This decodes whichever shape a given response carries
+    without raising on the other -- a single tolerant decoder both request pollers
+    can share: the status dict is ``None`` unless the frame is the full status, the
     :class:`~mg_ismart_india_client.models.ChargeStatus` is ``None`` unless it is
     the charging frame, and both are ``None`` for an empty/ack frame. The
     dispatcher is always returned so the poller keeps its result code and event
