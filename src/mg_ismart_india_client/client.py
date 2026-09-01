@@ -592,6 +592,7 @@ class MgIndiaClient:
         label: str,
         *,
         unavailable_results: tuple[int, ...] = (),
+        tolerate_framing_errors: bool = False,
     ) -> Any:
         """Poll one TAP request type to completion.
 
@@ -601,12 +602,16 @@ class MgIndiaClient:
         the poll budget, re-logging in once on an invalid session. A dispatcher
         result in ``unavailable_results`` means the server will not serve this frame
         to the account (e.g. charging that is gated to the owner) and returns
-        ``None`` rather than raising.
+        ``None`` rather than raising. ``tolerate_framing_errors`` retries malformed
+        responses within the poll budget; it is only enabled for the charge request,
+        where this transient response has been observed.
 
         :returns: the wanted frame, or ``None`` if the budget expired without it or
             the server declined to serve it.
         :raises MgIndiaApiError: on any other non-pending dispatcher result, or a
             session that stays invalid across a re-login.
+        :raises ValueError: on malformed responses unless framing-error tolerance is
+            enabled for this request.
         """
         for login_attempt in range(2):
             event_id = 0
@@ -617,6 +622,8 @@ class MgIndiaClient:
                         text
                     )
                 except ValueError:
+                    if not tolerate_framing_errors:
+                        raise
                     # An occasional malformed/empty framing (seen on a cold charge
                     # poll) is a transient blip, not a fault: keep polling within
                     # the budget rather than aborting the whole call.
@@ -676,8 +683,7 @@ class MgIndiaClient:
                 self._post_status_frame, lambda status, _charge: status, label
             )
             if payload is None:
-                # The required status frame never arrived; skip the charge poll and
-                # let the caller raise -- the charge frame rides with the status.
+                # A current status frame is required before charging is polled.
                 return None, None
             status_obj = parse_status(payload)
         if need_charge:
@@ -686,6 +692,7 @@ class MgIndiaClient:
                 lambda _status, charge: charge,
                 label,
                 unavailable_results=CHARGE_RESULT_UNAVAILABLE,
+                tolerate_framing_errors=True,
             )
         return status_obj, charge_obj
 

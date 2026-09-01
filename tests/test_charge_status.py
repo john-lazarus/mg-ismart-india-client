@@ -411,6 +411,16 @@ def test_charge_status_tolerates_a_transient_framing_error(monkeypatch):
     assert result is CHARGE_SENTINEL
 
 
+def test_status_propagates_a_framing_error(monkeypatch):
+    with pytest.raises(ValueError, match="unexpected TAP v2.1 response framing"):
+        _run_status(
+            monkeypatch,
+            status_frames=[RAISE_FRAMING],
+            attempts=1,
+            include_charge=False,
+        )
+
+
 def test_charge_status_unavailable_when_server_declines(monkeypatch):
     # result 5 = the server will not serve the charging frame to this account
     # (observed live on a secondary/shared account whose charging is gated
