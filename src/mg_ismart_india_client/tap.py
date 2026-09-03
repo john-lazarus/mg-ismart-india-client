@@ -306,7 +306,7 @@ def _decode_charge_app(app: bytes | None) -> ChargeStatus | None:
             charge_time_elapsed_s=cs.get("chargingDuration"),
             start_time=cs.get("startTime") or None,
             end_time=cs.get("endTime") or None,
-            charging_time_level_prc_raw=(
+            charge_time_remaining_min=(
                 None if time_level == _TIME_LEVEL_NA else time_level
             ),
             charging_pile_id=cs.get("chargingPileID") or None,
@@ -315,14 +315,16 @@ def _decode_charge_app(app: bytes | None) -> ChargeStatus | None:
             distance_since_last_charge_km=_scaled(
                 cs.get("mileageSinceLastCharge"), _MILEAGE_FACTOR
             ),
-            power_usage_since_last_charge_raw=cs.get("powerUsageSinceLastCharge"),
+            power_usage_since_last_charge_kwh=_scaled(
+                cs.get("powerUsageSinceLastCharge"), _ENERGY_FACTOR
+            ),
             mileage_of_day_raw=cs.get("mileageOfDay"),
             power_usage_of_day_raw=cs.get("powerUsageOfDay"),
             static_energy_consumption_raw=cs.get("staticEnergyConsumption"),
             total_battery_capacity_kwh=_scaled(
                 cs.get("totalBatteryCapacity"), _ENERGY_FACTOR
             ),
-            last_charge_energy_kwh=_scaled(
+            last_charge_ending_power_kwh=_scaled(
                 cs.get("lastChargeEndingPower"), _ENERGY_FACTOR
             ),
             fota_lowest_voltage_raw=cs.get("fotaLowestVoltage"),
