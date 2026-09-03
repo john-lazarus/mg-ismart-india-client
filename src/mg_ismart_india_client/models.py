@@ -172,10 +172,11 @@ class ChargeStatus:
     charging_current: float
     """Charging current, amperes; ~0 A when idle, so gate on :attr:`is_charging`."""
     battery_energy_kwh: float
-    """Energy currently in the pack, kilowatt-hours. Decoded from the frame's
-    ``realtimePower`` field x 0.1 despite the field's misleading name. Empirically
-    SOC x usable capacity: energy / SOC holds at ~37 kWh across every captured
-    frame from 45% to 100% SOC."""
+    """Energy currently in the pack, kilowatt-hours.
+
+    A measured BMS figure, not SOC arithmetic, so ``battery_energy_kwh / soc``
+    recovers the vehicle's usable pack size — useful because the frame reports
+    no capacity of its own (see :attr:`total_battery_capacity_kwh`)."""
     working_voltage: float | None
     """Pack voltage, volts, at coarser (2.5 V) resolution than
     :attr:`charging_voltage`; mirrors it in every captured frame."""
@@ -188,11 +189,14 @@ class ChargeStatus:
     start_time: int | None
     """Charge-session start, Unix epoch seconds; ``None`` when not charging."""
     end_time: int | None
-    """Estimated charge-session end, Unix epoch seconds; ``None`` when not
-    charging."""
-    charging_time_level_prc_raw: int | None
-    """Time-to-target field, raw. Counts down while charging; ``None`` here when
-    the frame sends its 0xFFFF idle sentinel. Unit/rate unconfirmed."""
+    """The frame's ``endTime``, Unix epoch seconds; ``None`` when not charging.
+
+    **Not a usable estimate.** It is a fixed offset from :attr:`start_time`
+    that does not move as the charge progresses. Use
+    :attr:`charge_time_remaining_min` instead."""
+    charge_time_remaining_min: int | None
+    """Estimated minutes until the charge completes; ``None`` when the frame
+    sends its idle sentinel."""
 
     charging_pile_id: str | None
     """Identifier of the charge point, when the vehicle reports one."""
@@ -204,9 +208,9 @@ class ChargeStatus:
     distance_since_last_charge_km: float | None
     """Distance driven since the last charge, kilometres (raw x 0.1); resets to 0
     at full."""
-    power_usage_since_last_charge_raw: int | None
-    """Energy used since the last charge, in **raw units** (scale unconfirmed;
-    varies inversely with SOC across captures)."""
+    power_usage_since_last_charge_kwh: float | None
+    """Energy drawn out of the pack since the last charge completed,
+    kilowatt-hours; resets to 0 when a charge completes."""
     mileage_of_day_raw: int | None
     """Distance travelled today, in **raw protocol units** (scale unconfirmed)."""
     power_usage_of_day_raw: int | None
@@ -217,9 +221,13 @@ class ChargeStatus:
     total_battery_capacity_kwh: float | None
     """Total pack capacity, kilowatt-hours (raw x 0.1); absent in captured frames,
     but the scale matches the global SAIC schema for this field."""
-    last_charge_energy_kwh: float | None
-    """Pack energy at the end of the last charge, kilowatt-hours (raw x 0.1);
-    mirrors :attr:`battery_energy_kwh` in every captured frame."""
+    last_charge_ending_power_kwh: float | None
+    """The frame's ``lastChargeEndingPower``, kilowatt-hours.
+
+    **Despite the name, not the energy the last charge ended at**: it tracks
+    live pack energy and mirrors :attr:`battery_energy_kwh`. A caller wanting
+    the real ending energy adds :attr:`power_usage_since_last_charge_kwh` to
+    the pack energy."""
     fota_lowest_voltage_raw: int | None
     """Lowest cell voltage reported for FOTA, in **raw units** (unconfirmed)."""
 
