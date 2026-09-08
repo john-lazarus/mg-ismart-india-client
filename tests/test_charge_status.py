@@ -97,7 +97,13 @@ def test_charging_70():
     assert s.status_time == 1786729051
     # pack energy: SOC 70% x 37.3 kWh usable ~= 26.0 kWh (realtimePower x 0.1)
     assert s.battery_energy_kwh == pytest.approx(26.0)
-    assert s.last_charge_energy_kwh == pytest.approx(26.0)
+    assert s.charge_time_remaining_min == 276
+    assert s.power_usage_since_last_charge_kwh == pytest.approx(8.8)
+    # lastChargeEndingPower is a misnomer: it mirrors live pack energy rather
+    # than reporting what the last charge ended at, so it must be decoded
+    # as-sent and left for the caller to interpret.
+    assert s.last_charge_ending_power_kwh == pytest.approx(26.0)
+    assert s.last_charge_ending_power_kwh == s.battery_energy_kwh
     # working V/I mirror the charging pair (coarser voltage, same current)
     assert s.working_voltage == 382.5
     assert s.working_current == pytest.approx(4.2)
@@ -132,6 +138,8 @@ def test_charging_11a():
     assert s.charging_current == pytest.approx(10.8)
     assert s.working_current == pytest.approx(10.8)
     assert s.battery_energy_kwh == pytest.approx(29.8)
+    assert s.power_usage_since_last_charge_kwh == pytest.approx(7.5)
+    assert s.last_charge_ending_power_kwh == pytest.approx(29.8)
 
 
 def test_charging_17a_soc45():
@@ -159,10 +167,13 @@ def test_idle_100():
     assert s.working_current == 0.0
     # full pack: 37.3 kWh usable
     assert s.battery_energy_kwh == pytest.approx(37.3)
+    # a completed charge zeroes the since-charge counters
+    assert s.power_usage_since_last_charge_kwh == 0.0
+    assert s.last_charge_ending_power_kwh == pytest.approx(37.3)
     # no active session, and the time-to-target sentinel decodes to None
     assert s.start_time is None
     assert s.end_time is None
-    assert s.charging_time_level_prc_raw is None
+    assert s.charge_time_remaining_min is None
     assert s.distance_since_last_charge_km == 0.0
 
 
