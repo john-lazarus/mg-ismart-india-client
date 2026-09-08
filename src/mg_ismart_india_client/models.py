@@ -174,7 +174,7 @@ class ChargeStatus:
     battery_energy_kwh: float
     """Energy currently in the pack, kilowatt-hours.
 
-    A measured BMS figure, not SOC arithmetic, so ``battery_energy_kwh / soc``
+    A measured BMS figure, not SOC arithmetic, so ``battery_energy_kwh / (soc / 100)``
     recovers the vehicle's usable pack size — useful because the frame reports
     no capacity of its own (see :attr:`total_battery_capacity_kwh`)."""
     working_voltage: float | None
