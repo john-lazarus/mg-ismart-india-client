@@ -128,6 +128,14 @@ class Status:
     independently of :attr:`status_time` here; the two may differ.
     """
 
+    power_mode_raw: int | None = None
+    engine_status_raw: int | None = None
+    side_lights_on: bool | None = None
+    dipped_beam_on: bool | None = None
+    main_beam_on: bool | None = None
+    front_left_seat_heat_level: int | None = None
+    front_right_seat_heat_level: int | None = None
+
 
 @dataclass(slots=True)
 class Snapshot:

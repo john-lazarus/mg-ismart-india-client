@@ -147,13 +147,10 @@ def encode_control_request(
     typ: int,
     params: list[tuple[int, bytes]],
 ) -> str:
-    app = codec21().encode(
-        "OTARVCReq",
-        {
-            "rvcReqType": bytes([typ]),
-            "rvcParams": [{"paramId": i, "paramValue": v} for i, v in params],
-        },
-    )
+    request = {"rvcReqType": bytes([typ])}
+    if params:
+        request["rvcParams"] = [{"paramId": i, "paramValue": v} for i, v in params]
+    app = codec21().encode("OTARVCReq", request)
     return _frame_v21(_dispatcher(uid, token, vin, CONTROL_APP_ID, app, event_id), app)
 
 
@@ -192,11 +189,22 @@ def _decode_v21(raw: str) -> tuple[dict[str, Any], bytes | None]:
     data = bytes.fromhex(raw[5:])
     if len(data) < 19:
         raise ValueError("short TAP v2.1 response")
+    if data[0] != TAP_PROTOCOL_VERSION:
+        raise ValueError("unsupported TAP response protocol")
     dispatcher_length = data[1]
     dispatcher_end = TAP_RESERVED_SIZE + dispatcher_length
     if dispatcher_length < 3 or dispatcher_end > len(data):
         raise ValueError("invalid TAP dispatcher length")
-    dispatcher = codec21().decode("MPDispatcherBody", data[19:dispatcher_end])
+    try:
+        dispatcher = codec21().decode("MPDispatcherBody", data[19:dispatcher_end])
+    except (asn1tools.Error, IndexError, TypeError) as err:
+        raise ValueError("invalid TAP dispatcher") from err
+    if dispatcher.get("applicationDataEncoding") not in (None, "perUnaligned"):
+        raise ValueError("unsupported TAP app encoding")
+    if dispatcher.get("applicationDataProtocolVersion") not in (None, PROTOCOL):
+        raise ValueError("unsupported TAP app protocol")
+    if dispatcher.get("result", 0) not in (0, 4, 6):
+        return dispatcher, None
     app_length = dispatcher.get("applicationDataLength", 0) or 0
     if not app_length:
         return dispatcher, None
@@ -208,18 +216,45 @@ def _decode_v21(raw: str) -> tuple[dict[str, Any], bytes | None]:
 
 def decode_status_response(raw: str) -> tuple[dict[str, Any], dict[str, Any] | None]:
     disp, app = _decode_v21(raw)
-    return disp, codec21().decode("OTARVMVehicleStatusResp513", app) if app else None
+    if disp.get("applicationID") != STATUS_APP_ID:
+        raise ValueError("unexpected status application identity")
+    try:
+        return disp, codec21().decode("OTARVMVehicleStatusResp513", app) if app else None
+    except (asn1tools.Error, IndexError, TypeError) as err:
+        raise ValueError("invalid TAP status payload") from err
 
 
 def decode_control_response(raw: str) -> tuple[dict[str, Any], dict[str, Any] | None]:
     disp, app = _decode_v21(raw)
-    return disp, codec21().decode("OTARVCStatus513", app) if app else None
+    if disp.get("applicationID") != CONTROL_APP_ID:
+        raise ValueError("unexpected control application identity")
+    try:
+        return disp, codec21().decode("OTARVCStatus513", app) if app else None
+    except (asn1tools.Error, IndexError, TypeError) as err:
+        raise ValueError("invalid TAP control payload") from err
 
 
 def decode_pin_response(raw: str) -> dict[str, Any]:
     payload = bytes.fromhex(raw[5:] if len(raw) >= 5 and raw[4] == "1" else raw)
-    dispatcher_length = payload[2]
-    return codec11().decode("MPDispatcherBodyV11", payload[4:dispatcher_length])
+    if len(payload) < 4:
+        raise ValueError("short TAP PIN header")
+    dispatcher_length = payload[2] + (payload[3] << 8)
+    if payload[0] != V11_PROTOCOL_VERSION or not 4 < dispatcher_length <= len(payload):
+        raise ValueError("invalid TAP PIN dispatcher header")
+    try:
+        dispatcher = codec11().decode("MPDispatcherBodyV11", payload[4:dispatcher_length])
+    except (asn1tools.Error, IndexError, TypeError) as err:
+        raise ValueError("invalid TAP PIN dispatcher") from err
+    if dispatcher.get("applicationID") != PIN_APP_ID:
+        raise ValueError("unexpected PIN application identity")
+    if dispatcher.get("applicationDataEncoding") not in (None, "perUnaligned"):
+        raise ValueError("unsupported TAP PIN encoding")
+    if dispatcher.get("applicationDataProtocolVersion") not in (None, PROTOCOL):
+        raise ValueError("unsupported TAP PIN protocol")
+    app_length = dispatcher.get("applicationDataLength", 0) or 0
+    if dispatcher_length + app_length > len(payload):
+        raise ValueError("truncated TAP PIN app data")
+    return dispatcher
 
 
 # EV charging status: a 63-byte app-id 511 frame, distinct from the 195-byte full
@@ -296,7 +331,10 @@ def _decode_charge_app(app: bytes | None) -> ChargeStatus | None:
             is_plugged_in=cs["chargingGunState"],
             charging_type=cs["chargingType"],
             charging_electricity_phase=cs.get("chargingElectricityPhase"),
-            soc=_scaled(soc, _SOC_FACTOR),
+            soc=(
+                _scaled(soc, _SOC_FACTOR)
+                if soc is not None and 0 <= soc <= 1000 else None
+            ),
             range_km=cs["fuelRange"] * _RANGE_FACTOR,
             charging_voltage=cs["chargingVoltage"] * _VOLTAGE_FACTOR,
             charging_current=_amps(cs["chargingCurrent"]),
@@ -355,6 +393,8 @@ def decode_charge_status_response(
         read the dispatcher fails loudly instead of polling blind.
     """
     dispatcher, app = _decode_v21(raw)
+    if dispatcher.get("applicationID") != STATUS_APP_ID:
+        raise ValueError("unexpected status application identity")
     return dispatcher, _decode_charge_app(app)
 
 
@@ -379,6 +419,8 @@ def decode_status_and_charge(
         fails loudly instead of polling blind.
     """
     dispatcher, app = _decode_v21(raw)
+    if dispatcher.get("applicationID") != STATUS_APP_ID:
+        raise ValueError("unexpected status application identity")
     if not app:
         return dispatcher, None, None
     charge = _decode_charge_app(app)

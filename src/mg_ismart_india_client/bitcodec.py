@@ -9,6 +9,8 @@ class PackedBitReader:
         self.offset = 0
 
     def read(self, count: int) -> int:
+        if count < 0 or self.offset + count > len(self.data) * 8:
+            raise ValueError("truncated packed bit field")
         value = 0
         for _ in range(count):
             absolute = self.offset
@@ -71,6 +73,8 @@ def set_fixed_7bit(buf: bytearray, offset: int, value: str) -> None:
 
 
 def read_msb_bits(buf: bytes | bytearray, offset: int, count: int) -> int:
+    if offset < 0 or count < 0 or offset + count > len(buf) * 8:
+        raise ValueError("truncated fixed bit field")
     value = 0
     for idx in range(count):
         absolute = offset + idx

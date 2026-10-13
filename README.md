@@ -51,6 +51,14 @@ pytest -q
 ruff check src tests
 ```
 
+## Release notes
+
+### 0.2.1
+
+- Reject malformed responses, mismatched vehicle identities and invalid charge values.
+- Avoid resending commands when their completion is uncertain.
+- Improve session recovery and verify lock outcomes against fresh vehicle status.
+
 ## License
 
 MIT License. Copyright (c) 2026 John Lazarus.

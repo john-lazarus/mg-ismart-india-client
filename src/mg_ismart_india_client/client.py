@@ -8,7 +8,7 @@ from dataclasses import replace
 from typing import Any
 from urllib.parse import urlencode
 
-from aiohttp import ClientSession
+from aiohttp import ClientError, ClientSession
 
 from .bitcodec import (
     PackedBitReader,
@@ -269,6 +269,13 @@ def parse_status(raw: dict[str, Any]) -> Status:
         handbrake=_bool(basic.get("handBrake")),
         gps=parse_gps_position(raw.get("gpsPosition")),
         raw=raw,
+        power_mode_raw=_int(basic.get("powerMode"), 0, 255),
+        engine_status_raw=_int(basic.get("engineStatus"), 0, 255),
+        side_lights_on=_bool(basic.get("sideLightStatus")),
+        dipped_beam_on=_bool(basic.get("dippedBeamStatus")),
+        main_beam_on=_bool(basic.get("mainBeamStatus")),
+        front_left_seat_heat_level=_int(basic.get("frontLeftSeatHeatLevel"), 0, 255),
+        front_right_seat_heat_level=_int(basic.get("frontRightSeatHeatLevel"), 0, 255),
     )
 
 
@@ -318,6 +325,10 @@ class ChargingStatusUnavailable(MgIndiaApiError):
     """No charging frame was observed within the poll budget."""
 
 
+class MgIndiaCommandIndeterminate(MgIndiaApiError):
+    """A command was sent, but its completion is unknown; do not replay it."""
+
+
 class MgIndiaLoginRejected(MgIndiaApiError):
     """Definitive server verdict on a login (bad password, unregistered number,
     daily attempt limit). Terminal - retrying only wastes daily attempts."""
@@ -348,8 +359,13 @@ def login_error_from_response(payload: bytes) -> MgIndiaApiError | None:
     it lets the caller surface that reason instead of blindly parsing a success
     layout and crashing on the (absent) token payload.
     """
+    if len(payload) < 4:
+        return None
+    dispatcher_end = payload[2] + (payload[3] << 8)
+    if not 4 < dispatcher_end <= len(payload):
+        return None
     try:
-        dispatcher = codec11().decode("MPDispatcherBodyV11", payload[4:])
+        dispatcher = codec11().decode("MPDispatcherBodyV11", payload[4:dispatcher_end])
     except Exception:
         return None
     result = dispatcher.get("result")
@@ -365,19 +381,24 @@ def login_error_from_response(payload: bytes) -> MgIndiaApiError | None:
 def decode_login_response(raw: str) -> tuple[str, str]:
     if len(raw) < 5 or raw[4] != "1":
         raise MgIndiaApiError("Unexpected TAP login response framing")
-    payload = bytes.fromhex(raw[5:])
+    try:
+        payload = bytes.fromhex(raw[5:])
+    except ValueError as err:
+        raise MgIndiaApiError("Invalid TAP login response encoding") from err
     if len(payload) < 4:
         raise MgIndiaApiError("TAP login response is too short")
+    dispatcher_len = payload[2] + (payload[3] << 8)
+    if not 4 <= dispatcher_len <= len(payload):
+        raise MgIndiaApiError("Invalid TAP login dispatcher length")
     # Surface a server-side rejection (bad password, unauthorized account,
     # daily attempt limit) with its real message before attempting to parse a
     # success layout that isn't there.
     error = login_error_from_response(payload)
     if error is not None:
         raise error
-    dispatcher_len = payload[2] + (payload[3] << 8)
     dispatcher = payload[:dispatcher_len]
     app = payload[dispatcher_len:]
-    if len(dispatcher) < 50 or len(app) < 11:
+    if len(dispatcher) < 50 or len(app) * 8 < 6 + 40 * 7 + 40 * 7:
         raise MgIndiaApiError(
             "Login rejected by MG India server (check phone/password, or the "
             "account may not be authorized for this app)"
@@ -393,6 +414,8 @@ def decode_login_response(raw: str) -> tuple[str, str]:
 
 
 class MgIndiaClient:
+    """Single-flight account client: callers must serialize operations and VIN changes."""
+
     def __init__(
         self,
         session: ClientSession,
@@ -471,7 +494,7 @@ class MgIndiaClient:
         ) from last_error
 
     async def gateway_get(
-        self, path: str, params: dict[str, Any] | None = None
+        self, path: str, params: dict[str, Any] | None = None, *, _session_retry: bool = True
     ) -> dict[str, Any]:
         if not self.token or not self.uid:
             await self.login()
@@ -504,8 +527,10 @@ class MgIndiaClient:
             headers_out = response.headers
         parsed = json.loads(decrypt_gateway_body(text, headers_out))
         if parsed.get("code") == 7:
+            if not _session_retry:
+                raise MgIndiaApiError("Gateway session remains invalid after login")
             await self.login()
-            return await self.gateway_get(path, params)
+            return await self.gateway_get(path, params, _session_retry=False)
         if parsed.get("code") not in (0, None):
             raise MgIndiaApiError(
                 parsed.get("message") or f"Gateway error code {parsed.get('code')}"
@@ -513,13 +538,15 @@ class MgIndiaClient:
         return parsed
 
     async def vehicles(self) -> list[Vehicle]:
+        operation_vin = self.vin
         data = await self.gateway_get("/vehicle/userVinList")
         vehicles = [parse_vehicle(x) for x in _as_list(data) if isinstance(x, dict)]
-        if self.vin:
-            self.vehicle = next(
-                (v for v in vehicles if v.vin == self.vin),
-                vehicles[0] if vehicles else None,
-            )
+        if self.vin != operation_vin:
+            raise MgIndiaApiError("VIN changed during vehicle discovery")
+        if operation_vin:
+            self.vehicle = next((v for v in vehicles if v.vin == operation_vin), None)
+            if self.vehicle is None:
+                raise MgIndiaApiError("Configured vehicle is absent from the account")
         elif vehicles:
             self.vehicle = vehicles[0]
             self.vin = self.vehicle.vin
@@ -528,6 +555,7 @@ class MgIndiaClient:
     async def refresh_capabilities(self) -> Capabilities:
         if not self.vin:
             await self.vehicles()
+        operation_vin = self.vin
         payloads = []
         for path in (
             "/vehicle/feature/list",
@@ -536,9 +564,13 @@ class MgIndiaClient:
             "/navi/vehicle/co2info/supplementInfo",
         ):
             try:
-                payloads.append(await self.gateway_get(path, {"vin": self.vin}))
+                payloads.append(await self.gateway_get(path, {"vin": operation_vin}))
+            except MgIndiaLoginRejected:
+                raise
             except Exception:
                 pass
+        if self.vin != operation_vin:
+            raise MgIndiaApiError("VIN changed during capability discovery")
         self.capabilities = discover_capabilities(payloads)
         return self.capabilities
 
@@ -593,6 +625,7 @@ class MgIndiaClient:
         *,
         unavailable_results: tuple[int, ...] = (),
         tolerate_framing_errors: bool = False,
+        operation_vin: str | None = None,
     ) -> Any:
         """Poll one TAP request type to completion.
 
@@ -616,6 +649,8 @@ class MgIndiaClient:
         for login_attempt in range(2):
             event_id = 0
             for attempt in range(STATUS_ATTEMPTS):
+                if self.vin != operation_vin:
+                    raise MgIndiaApiError("VIN changed during polling")
                 text = await post(event_id, label)
                 try:
                     dispatcher, status_payload, charge = decode_status_and_charge(
@@ -630,9 +665,8 @@ class MgIndiaClient:
                     if attempt < STATUS_ATTEMPTS - 1:
                         await asyncio.sleep(STATUS_DELAY)
                     continue
-                frame = want(status_payload, charge)
-                if frame is not None:
-                    return frame
+                if dispatcher.get("vin") not in (None, operation_vin):
+                    raise MgIndiaApiError("TAP response vehicle does not match request")
                 result = dispatcher.get("result", 0)
                 if result == STATUS_RESULT_SESSION_INVALID:
                     if login_attempt == 0:
@@ -643,6 +677,9 @@ class MgIndiaClient:
                     return None
                 if result not in STATUS_RESULT_PENDING:
                     raise MgIndiaApiError(f"{label} failed: result {result}")
+                frame = want(status_payload, charge)
+                if frame is not None:
+                    return frame
                 event_id = dispatcher.get("eventID", event_id)
                 if attempt < STATUS_ATTEMPTS - 1:
                     await asyncio.sleep(STATUS_DELAY)
@@ -672,15 +709,20 @@ class MgIndiaClient:
             that stays invalid across a re-login -- protocol/session faults, never
             reported as "no data".
         """
+        operation_vin = self.vin
         if not self.token:
             await self.login()
-        if not self.vin:
+        if operation_vin is None:
             await self.vehicles()
+            operation_vin = self.vin
         status_obj: Status | None = None
         charge_obj: ChargeStatus | None = None
         if need_status:
             payload = await self._poll_request(
-                self._post_status_frame, lambda status, _charge: status, label
+                self._post_status_frame,
+                lambda status, _charge: status,
+                label,
+                operation_vin=operation_vin,
             )
             if payload is None:
                 # A current status frame is required before charging is polled.
@@ -693,6 +735,7 @@ class MgIndiaClient:
                 label,
                 unavailable_results=CHARGE_RESULT_UNAVAILABLE,
                 tolerate_framing_errors=True,
+                operation_vin=operation_vin,
             )
         return status_obj, charge_obj
 
@@ -769,12 +812,17 @@ class MgIndiaClient:
         return charge_obj
 
     async def snapshot(self) -> Snapshot:
-        if not self.vehicle:
+        if not self.vehicle or self.vehicle.vin != self.vin:
             await self.vehicles()
+        vehicle = self.vehicle
+        if vehicle is None:
+            raise MgIndiaApiError("No vehicle is available for a snapshot")
         caps = await self.refresh_capabilities()
         status = await self.status()
+        if self.vin != vehicle.vin:
+            raise MgIndiaApiError("VIN changed during snapshot")
         return Snapshot(
-            self.vehicle or Vehicle(self.vin or "unknown", self.vin or "unknown"),
+            vehicle,
             caps,
             status,
         )
@@ -782,15 +830,18 @@ class MgIndiaClient:
     async def verify_pin(self) -> None:
         if not self.pin_hash:
             raise MgIndiaApiError("Control PIN is not configured")
+        operation_vin = self.vin
         for login_attempt in range(2):
             if not self.token or not self.uid:
                 await self.login()
-            if not self.vin:
+            if operation_vin is None:
                 await self.vehicles()
+                operation_vin = self.vin
+            uid, token = self.uid, self.token
             body = encode_pin_request(
-                self.uid or "0" * 50,
-                self.token or "0" * 40,
-                self.vin or "",
+                uid or "0" * 50,
+                token or "0" * 40,
+                operation_vin or "",
                 self._next_event(),
                 self.pin_hash,
             )
@@ -812,9 +863,16 @@ class MgIndiaClient:
                     raise MgIndiaApiError(
                         f"PIN verification failed: HTTP {response.status}"
                     )
-            dispatcher = decode_pin_response(text)
+            try:
+                dispatcher = decode_pin_response(text)
+            except ValueError as err:
+                raise MgIndiaApiError("PIN response could not be decoded") from err
+            if dispatcher.get("vin") not in (None, operation_vin):
+                raise MgIndiaApiError("PIN response vehicle does not match request")
             result = dispatcher.get("result", 0)
             if result == 0:
+                if (self.uid, self.token) != (uid, token):
+                    raise MgIndiaApiError("Session changed during PIN verification")
                 return
             if result == 2 and login_attempt == 0:
                 await self.login()
@@ -825,58 +883,55 @@ class MgIndiaClient:
     async def _control(
         self, name: str, typ: int, params: list[tuple[int, bytes]]
     ) -> None:
+        operation_vin = self.vin
         await self.verify_pin()
+        if operation_vin is None:
+            operation_vin = self.vin
+        if self.vin != operation_vin:
+            raise MgIndiaApiError("VIN changed during PIN verification")
+        uid, token = self.uid, self.token
         event_id = 0
         for attempt in range(CONTROL_ATTEMPTS):
             body = encode_control_request(
-                self.uid or "0" * 50,
-                self.token or "0" * 40,
-                self.vin or "",
+                uid or "0" * 50,
+                token or "0" * 40,
+                operation_vin or "",
                 event_id,
                 typ,
                 params,
             )
-            async with self.session.post(
-                TAP_STATUS_URL,
-                data=body,
-                headers={
-                    "User-Agent": USER_AGENT,
-                    "Content-Type": "text/plain",
-                    "Accept": "*/*",
-                    "Accept-Language": "en-US;q=1",
-                    "APP-SIGNATURE": tap_signature(body),
-                    "SIGNATURE": "1",
-                },
-                timeout=30,
-            ) as response:
-                text = await response.text()
-                if response.status >= 400:
-                    raise MgIndiaApiError(f"{name} failed: HTTP {response.status}")
+            try:
+                text = await self._post_tap_frame(body, name)
+            except (TimeoutError, MgIndiaApiError, ClientError) as err:
+                raise MgIndiaCommandIndeterminate(f"{name} completion is unknown") from err
             try:
                 dispatcher, control = decode_control_response(text)
             except (MgIndiaApiError, ValueError) as err:
-                if attempt == 0:
-                    await self.login()
-                    event_id = 0
-                    continue
-                raise MgIndiaApiError(f"{name} response could not be decoded") from err
+                raise MgIndiaCommandIndeterminate(
+                    f"{name} response could not be decoded"
+                ) from err
             result = dispatcher.get("result", 0)
-            if result in (2, 3) and attempt == 0:
-                await self.login()
-                event_id = 0
-                continue
+            if result not in STATUS_RESULT_PENDING:
+                # Session recovery is verified for reads/PIN, not for commands.
+                raise MgIndiaCommandIndeterminate(
+                    f"{name} completion unknown: result {result}"
+                )
+            if dispatcher.get("vin") not in (None, operation_vin):
+                raise MgIndiaCommandIndeterminate("Control response vehicle does not match request")
+            if control and control.get("rvcReqType") not in (None, bytes([typ])):
+                raise MgIndiaCommandIndeterminate("Control response type does not match request")
             if control:
                 status = control.get("rvcReqSts")
                 if status == b"\x02":
                     return
                 if status not in (None, b"\x01"):
                     raise MgIndiaApiError(f"{name} failed: status {status!r}")
-            if result not in (0, 4, 6):
-                raise MgIndiaApiError(f"{name} failed: result {result}")
             event_id = dispatcher.get("eventID", event_id)
+            if not event_id:
+                raise MgIndiaCommandIndeterminate(f"{name} completion unknown: no polling cursor")
             if attempt < CONTROL_ATTEMPTS - 1:
                 await asyncio.sleep(CONTROL_DELAY)
-        raise MgIndiaApiError(f"{name} did not complete")
+        raise MgIndiaCommandIndeterminate(f"{name} did not complete")
 
     async def control_climate(self, on: bool) -> None:
         params = (
@@ -898,15 +953,28 @@ class MgIndiaClient:
                 (255, b"\x00"),
             ]
         )
+        if not self.vin:
+            await self.vehicles()
+        operation_vin = self.vin
         try:
             await self._control("Door lock", 1 if lock else 2, params)
         except MgIndiaApiError as err:
             # MG India sometimes applies a lock/unlock command but never returns
             # a terminal remote-command status. Treat it as success only when a
             # fresh status read proves the target lock state was achieved.
-            if "did not complete" in str(err):
-                status = await self.status()
-                if status.locked is lock:
+            if "did not complete" in str(err) and self.vin == operation_vin:
+                verification_started_at = time.time()
+                try:
+                    status = await self.status()
+                except (MgIndiaApiError, ValueError):
+                    raise err from None
+                measured_at = status.status_time
+                if (
+                    self.vin == operation_vin
+                    and measured_at is not None
+                    and verification_started_at < measured_at <= time.time()
+                    and status.locked is lock
+                ):
                     return
             raise
 
