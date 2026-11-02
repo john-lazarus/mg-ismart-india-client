@@ -175,6 +175,34 @@ def test_vehicle_is_electric():
     assert not odd_config.is_electric
 
 
+# Shapes from a real India vehicle list; petrol Astor reports series "New ZS" with EV "0", so "zs" must not mean electric.
+def test_is_electric_from_real_vehicle_list():
+    astor = {
+        "vin": "TESTVINASTOR0001",
+        "brandName": "MG",
+        "modelName": "ZS ASTOR VTi-TECH CVT SAVVY RED",
+        "series": "New ZS",
+        "modelYear": "2021",
+        "vehicleModelConfiguration": [
+            {"itemCode": "EV", "itemValue": "0"},
+            {"itemCode": "ENGINE", "itemValue": "1"},
+        ],
+    }
+    comet = {
+        "vin": "TESTVINCOMET0001",
+        "brandName": "MG",
+        "modelName": "COMET EV EXCLUSIVE FC",
+        "series": "E230",
+        "modelYear": "2024",
+        "vehicleModelConfiguration": [
+            {"itemCode": "EV", "itemValue": "1"},
+            {"itemCode": "ENGINE", "itemValue": "1"},
+        ],
+    }
+    assert parse_vehicle(astor).is_electric is False
+    assert parse_vehicle(comet).is_electric is True
+
+
 def test_snapshot_battery_soc():
     ev = Vehicle("v", "Comet", "MG", "Comet")
     petrol = Vehicle("v", "Astor", "MG", "ZS")
