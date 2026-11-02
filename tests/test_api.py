@@ -2,6 +2,7 @@ import random
 
 import pytest
 
+from mg_ismart_india_client import MgIndiaLoginRejected, MgIndiaMfaRequired
 from mg_ismart_india_client.bitcodec import PackedBitWriter
 from mg_ismart_india_client.client import (
     decode_login_response,
@@ -17,7 +18,13 @@ from mg_ismart_india_client.crypto import (
     normalize_phone,
     tap_signature,
 )
-from mg_ismart_india_client.models import Vehicle
+from mg_ismart_india_client.models import (
+    Capabilities,
+    ChargeStatus,
+    Snapshot,
+    Status,
+    Vehicle,
+)
 from mg_ismart_india_client.tap import (
     codec11,
     encode_control_request,
@@ -135,6 +142,46 @@ def test_decode_login_response_surfaces_server_error_message():
     )
     with pytest.raises(MgIndiaApiError, match="Incorrect password"):
         decode_login_response(raw)
+
+
+def test_login_multi_factor_error_is_mfa_required():
+    raw = _v11_login_frame(
+        {
+            "applicationID": "501",
+            "eventCreationTime": 1,
+            "messageID": 1,
+            "iccID": "12345678901234567890",
+            "applicationDataLength": 0,
+            "applicationDataProtocolVersion": 513,
+            "result": 15030,
+            "errorMessage": b"Multi Factor authentication required",
+        }
+    )
+    with pytest.raises(MgIndiaMfaRequired, match="SMS code") as err:
+        decode_login_response(raw)
+    assert isinstance(err.value, MgIndiaLoginRejected)
+
+
+def test_vehicle_is_electric():
+    ev_flag = Vehicle("v", "Car", "MG", "Hector", raw={"config": {"EV": "1"}})
+    comet = Vehicle("v", "My Comet", "MG", None)
+    astor = Vehicle("v", "Astor", "MG", "ZS", raw={"config": {"EV": "0", "BType": "0"}})
+    assert ev_flag.is_electric and comet.is_electric
+    assert not astor.is_electric
+
+
+def test_snapshot_battery_soc():
+    ev = Vehicle("v", "Comet", "MG", "Comet")
+    petrol = Vehicle("v", "Astor", "MG", "ZS")
+    charge = object.__new__(ChargeStatus)
+    object.__setattr__(charge, "soc", 71.0)
+
+    def snap(vehicle, **status):
+        return Snapshot(vehicle, Capabilities(), Status(**status))
+
+    assert snap(ev, charge=charge, fuel_level=50).battery_soc == 71.0
+    assert snap(ev, fuel_level=50).battery_soc == 50
+    assert snap(petrol, fuel_level=50).battery_soc is None
 
 
 def test_decode_login_response_raises_clean_error_on_short_dispatcher():

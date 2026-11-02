@@ -112,6 +112,11 @@ def test_charging_70():
     assert s.distance_since_last_charge_km == pytest.approx(138.5)
 
 
+def test_charging_power_kw():
+    s = decode_charge_status(CHARGING_70)
+    assert s.charging_power_kw == pytest.approx(1.6044)
+
+
 def test_charging_74():
     s = decode_charge_status(CHARGING_74)
     assert s is not None

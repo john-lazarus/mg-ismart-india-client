@@ -2,6 +2,7 @@ from .client import ChargingStatusUnavailable as ChargingStatusUnavailable
 from .client import MgIndiaClient as MgIndiaClient
 from .client import MgIndiaCommandIndeterminate as MgIndiaCommandIndeterminate
 from .client import MgIndiaLoginRejected as MgIndiaLoginRejected
+from .client import MgIndiaMfaRequired as MgIndiaMfaRequired
 from .client import parse_gps_position as parse_gps_position
 from .client import parse_status as parse_status
 from .crypto import MgIndiaApiError as MgIndiaApiError

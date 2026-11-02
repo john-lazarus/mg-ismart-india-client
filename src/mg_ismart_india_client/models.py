@@ -59,6 +59,31 @@ class Vehicle:
     """Exterior colour as reported by the API, e.g. "Clay Beige"."""
     series: str | None = None
     """Raw API model/series code (e.g. "EQ100"), needed for per-model asset lookups (images, CDN paths). Distinct from :attr:`model`."""
+
+    @property
+    def is_electric(self) -> bool:
+        """True if the vehicle is an EV, from its config flags or its name."""
+        ev = _vehicle_config(self, "EV")
+        btype = _vehicle_config(self, "BType")
+        if any(str(v).strip() == "1" for v in (ev, btype) if v is not None):
+            return True
+        text = " ".join(str(v or "") for v in (self.name, self.model, self.brand, ev, btype))
+        return any(t in text.lower() for t in ("electric", " ev", "comet", "windsor"))
+
+
+def _vehicle_config(vehicle: Vehicle, code: str, default: Any = None) -> Any:
+    raw = getattr(vehicle, "raw", None)
+    if isinstance(raw, dict):
+        for block_name in ("configuration", "config", "modelConfig"):
+            block = raw.get(block_name)
+            if isinstance(block, dict) and code in block:
+                return block[code]
+        for item in raw.get("vehicleModelConfiguration", []) or []:
+            if isinstance(item, dict) and item.get("itemCode") == code:
+                return item.get("itemValue", default)
+    return default
+
+
 @dataclass(slots=True)
 class Capabilities:
     climate: bool = False
@@ -144,6 +169,21 @@ class Snapshot:
     status: Status
     user_info: dict[str, Any] = field(default_factory=dict)
 
+    @property
+    def battery_soc(self) -> float | None:
+        """Battery state of charge, percent; ``None`` for a non-EV.
+
+        Uses the charge frame's SOC when one is attached and carries it, else
+        the status ``fuel_level``: for India EVs that field holds the battery
+        SOC, and shared accounts get no charge frame.
+        """
+        if not self.vehicle.is_electric:
+            return None
+        charge = self.status.charge
+        if charge is not None and charge.soc is not None:
+            return charge.soc
+        return self.status.fuel_level
+
 
 @dataclass(frozen=True, slots=True)
 class ChargeStatus:
@@ -178,7 +218,8 @@ class ChargeStatus:
     charging_voltage: float
     """Charging (pack) voltage, volts."""
     charging_current: float
-    """Charging current, amperes; ~0 A when idle, so gate on :attr:`is_charging`."""
+    """Charging current, amperes; positive while charging, ~0 A when idle, so gate
+    on :attr:`is_charging`."""
     battery_energy_kwh: float
     """Energy currently in the pack, kilowatt-hours.
 
@@ -257,3 +298,11 @@ class ChargeStatus:
     — the shape and contents of this dict are not part of the public API and may
     change with the protocol schema at any time.
     """
+
+    @property
+    def charging_power_kw(self) -> float:
+        """Charging power, kilowatts: ``charging_voltage * charging_current / 1000``.
+
+        Positive while charging (the current is positive then), ~0 when idle.
+        """
+        return self.charging_voltage * self.charging_current / 1000

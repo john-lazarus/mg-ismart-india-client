@@ -53,6 +53,13 @@ ruff check src tests
 
 ## Release notes
 
+### 0.3.0
+
+- Add `Vehicle.is_electric`.
+- Add `Snapshot.battery_soc`, using the charge frame's SOC or falling back to the status fuel level for EVs.
+- Add `ChargeStatus.charging_power_kw`.
+- Add `MgIndiaMfaRequired`, a subclass of `MgIndiaLoginRejected`, raised when the account has multi-factor login turned on.
+
 ### 0.2.1
 
 - Reject malformed responses, mismatched vehicle identities and invalid charge values.

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import re
 import time
 from collections.abc import Awaitable, Callable
 from dataclasses import replace
@@ -334,6 +335,11 @@ class MgIndiaLoginRejected(MgIndiaApiError):
     daily attempt limit). Terminal - retrying only wastes daily attempts."""
 
 
+class MgIndiaMfaRequired(MgIndiaLoginRejected):
+    """The account has multi-factor login on, which needs an SMS code this
+    client cannot supply. Terminal until the user turns it off in the app."""
+
+
 # The MG iSMART India app caps the login password at 16 characters (its input
 # field has maxLength=16), so only the first 16 chars ever authenticate. A user
 # may type or store a longer password (e.g. one from a password manager), but
@@ -375,6 +381,12 @@ def login_error_from_response(payload: bytes) -> MgIndiaApiError | None:
     if isinstance(message, (bytes, bytearray)):
         message = message.decode("utf-8", "replace").strip()
     detail = message or f"result {result}"
+    if re.search(r"multi[ -]factor", detail, re.I):
+        return MgIndiaMfaRequired(
+            "MG India login needs an SMS code because multi-factor login is on "
+            "for this account. Turn it off in the MG iSMART app's security "
+            f"settings, then try again. ({detail})"
+        )
     return MgIndiaLoginRejected(f"MG India login rejected: {detail}")
 
 
