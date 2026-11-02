@@ -381,7 +381,7 @@ def login_error_from_response(payload: bytes) -> MgIndiaApiError | None:
     if isinstance(message, (bytes, bytearray)):
         message = message.decode("utf-8", "replace").strip()
     detail = message or f"result {result}"
-    if re.search(r"multi[ -]factor", detail, re.I):
+    if re.search(r"multi[\s-]?factor|\bmfa\b", detail, re.I):
         return MgIndiaMfaRequired(
             "MG India login needs an SMS code because multi-factor login is on "
             "for this account. Turn it off in the MG iSMART app's security "

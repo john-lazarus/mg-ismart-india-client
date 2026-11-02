@@ -145,20 +145,21 @@ def test_decode_login_response_surfaces_server_error_message():
 
 
 def test_login_multi_factor_error_is_mfa_required():
-    raw = _v11_login_frame(
-        {
-            "applicationID": "501",
-            "eventCreationTime": 1,
-            "messageID": 1,
-            "iccID": "12345678901234567890",
-            "applicationDataLength": 0,
-            "applicationDataProtocolVersion": 513,
-            "result": 15030,
-            "errorMessage": b"Multi Factor authentication required",
-        }
-    )
-    with pytest.raises(MgIndiaMfaRequired, match="SMS code") as err:
-        decode_login_response(raw)
+    for message in (b"Multi Factor authentication required", b"multifactor required"):
+        raw = _v11_login_frame(
+            {
+                "applicationID": "501",
+                "eventCreationTime": 1,
+                "messageID": 1,
+                "iccID": "12345678901234567890",
+                "applicationDataLength": 0,
+                "applicationDataProtocolVersion": 513,
+                "result": 15030,
+                "errorMessage": message,
+            }
+        )
+        with pytest.raises(MgIndiaMfaRequired, match="SMS code") as err:
+            decode_login_response(raw)
     assert isinstance(err.value, MgIndiaLoginRejected)
 
 
@@ -166,8 +167,12 @@ def test_vehicle_is_electric():
     ev_flag = Vehicle("v", "Car", "MG", "Hector", raw={"config": {"EV": "1"}})
     comet = Vehicle("v", "My Comet", "MG", None)
     astor = Vehicle("v", "Astor", "MG", "ZS", raw={"config": {"EV": "0", "BType": "0"}})
-    assert ev_flag.is_electric and comet.is_electric
-    assert not astor.is_electric
+    zs_ev = Vehicle("v", "ZS-EV", "MG", None)
+    everyday = Vehicle("v", "My Everyday car", "MG", None)
+    odd_config = Vehicle("v", "Astor", "MG", None, raw={"vehicleModelConfiguration": 5})
+    assert ev_flag.is_electric and comet.is_electric and zs_ev.is_electric
+    assert not astor.is_electric and not everyday.is_electric
+    assert not odd_config.is_electric
 
 
 def test_snapshot_battery_soc():

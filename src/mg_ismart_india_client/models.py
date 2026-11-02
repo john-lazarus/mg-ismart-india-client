@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass, field
 from enum import IntEnum
 from typing import Any
@@ -68,7 +69,7 @@ class Vehicle:
         if any(str(v).strip() == "1" for v in (ev, btype) if v is not None):
             return True
         text = " ".join(str(v or "") for v in (self.name, self.model, self.brand, ev, btype))
-        return any(t in text.lower() for t in ("electric", " ev", "comet", "windsor"))
+        return bool(re.search(r"\bev\b|electric|comet|windsor", text, re.I))
 
 
 def _vehicle_config(vehicle: Vehicle, code: str, default: Any = None) -> Any:
@@ -78,7 +79,8 @@ def _vehicle_config(vehicle: Vehicle, code: str, default: Any = None) -> Any:
             block = raw.get(block_name)
             if isinstance(block, dict) and code in block:
                 return block[code]
-        for item in raw.get("vehicleModelConfiguration", []) or []:
+        items = raw.get("vehicleModelConfiguration")
+        for item in items if isinstance(items, list) else []:
             if isinstance(item, dict) and item.get("itemCode") == code:
                 return item.get("itemValue", default)
     return default
