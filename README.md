@@ -41,6 +41,11 @@ async with aiohttp.ClientSession() as session:
 
 Control methods require a configured PIN hash. The raw 4-digit control PIN is not stored by the client.
 
+## Account notes
+
+- Multi-factor login (the SMS code) isn't supported yet. If it's switched on for the account, `login()` raises `MgIndiaMfaRequired`. Switching it off in the MG app's security settings lets the client log in.
+- MG India allows one login session per account. Logging in with the client signs the MG app out on the phone.
+
 ## Development
 
 ```bash
