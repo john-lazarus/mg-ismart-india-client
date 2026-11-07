@@ -311,7 +311,7 @@ def _run_charge_status(monkeypatch, responses, *, attempts=3):
     """
     from mg_ismart_india_client import client as client_mod
 
-    monkeypatch.setattr(client_mod, "STATUS_ATTEMPTS", attempts)
+    monkeypatch.setattr(client_mod, "CHARGE_ATTEMPTS", attempts)
     client = _client()
     _status_cursors, charge_cursors, logins = _patch_poll(
         monkeypatch, client, status_frames=[], charge_frames=responses
@@ -330,6 +330,7 @@ def _run_status(
     from mg_ismart_india_client import client as client_mod
 
     monkeypatch.setattr(client_mod, "STATUS_ATTEMPTS", attempts)
+    monkeypatch.setattr(client_mod, "CHARGE_ATTEMPTS", attempts)
     client = _client()
     status_cursors, charge_cursors, logins = _patch_poll(
         monkeypatch,
@@ -581,3 +582,20 @@ def test_status_timeout_still_returns_on_an_early_frame(monkeypatch):
     )
     assert asyncio.run(client.status()).status_time == STATUS_TIME
     assert status_cursors == [0]
+
+
+def test_status_timeout_does_not_change_the_charge_poll_budget(monkeypatch):
+    from mg_ismart_india_client import client as client_mod
+
+    monkeypatch.setattr(client_mod, "CHARGE_ATTEMPTS", 3)
+    client = _client()
+    client.status_timeout = 90
+    _status_cursors, charge_cursors, _logins = _patch_poll(
+        monkeypatch,
+        client,
+        status_frames=[],
+        charge_frames=[({"result": 4, "eventID": 1}, None) for _ in range(10)],
+    )
+    with pytest.raises(ChargingStatusUnavailable):
+        asyncio.run(client.charge_status())
+    assert len(charge_cursors) == 3

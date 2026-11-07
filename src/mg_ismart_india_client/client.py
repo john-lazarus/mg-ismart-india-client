@@ -58,6 +58,9 @@ LOGIN_ATTEMPTS = 3
 LOGIN_DELAY = 1.5
 # 45 s is a starting value pending a measured wake time for parked petrol cars.
 STATUS_ATTEMPTS = 30
+# The charging frame keeps the old 15 s budget: an unplugged EV or a shared account
+# often never sends one, and the longer wait is only needed to wake a sleeping car.
+CHARGE_ATTEMPTS = 10
 STATUS_DELAY = 1.5
 # TAP dispatcher `result` codes on the status endpoint. 0 is success; 4 and 6 mean
 # the vehicle has not answered yet, so all three simply continue the poll. 2 means
@@ -669,6 +672,7 @@ class MgIndiaClient:
         unavailable_results: tuple[int, ...] = (),
         tolerate_framing_errors: bool = False,
         operation_vin: str | None = None,
+        charge: bool = False,
     ) -> Any:
         """Poll one TAP request type to completion.
 
@@ -687,10 +691,13 @@ class MgIndiaClient:
         :raises MgIndiaApiError: on any other non-pending dispatcher result, or a
             session that stays invalid across a re-login.
         :raises ValueError: on malformed responses unless framing-error tolerance is
-            enabled for this request.
+            enabled for this request. ``charge`` selects the fixed charging budget
+        (``CHARGE_ATTEMPTS``) instead of the status one.
         """
         attempts = (
-            STATUS_ATTEMPTS
+            CHARGE_ATTEMPTS
+            if charge
+            else STATUS_ATTEMPTS
             if self.status_timeout is None
             else max(1, math.ceil(self.status_timeout / STATUS_DELAY))
         )
@@ -784,6 +791,7 @@ class MgIndiaClient:
                 unavailable_results=CHARGE_RESULT_UNAVAILABLE,
                 tolerate_framing_errors=True,
                 operation_vin=operation_vin,
+                charge=True,
             )
         return status_obj, charge_obj
 

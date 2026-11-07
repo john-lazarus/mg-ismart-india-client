@@ -63,13 +63,13 @@ Calls made outside `for_vehicle()` work exactly as before, for a single car set 
 
 ## Waiting for a sleeping car
 
-`status()` polls until the car answers, for up to 30 x 1.5 s (45 s) per request. A parked car can take longer to wake than one that is awake. Pass `status_timeout` (seconds) to change the wait:
+`status()` polls until the car answers, for up to 30 x 1.5 s (45 s) for the status request. A parked car can take longer to wake than one that is awake. Pass `status_timeout` (seconds) to change the status wait:
 
 ```python
 client = MgIndiaClient(session, phone="9876543210", password="your-password", status_timeout=90)
 ```
 
-It still returns as soon as the car answers.
+It still returns as soon as the car answers. The charging frame (`status(include_charge=True)`, `charge_status()`) keeps its own 15 s wait, which `status_timeout` does not change.
 
 ## Is the car moving?
 
@@ -94,7 +94,7 @@ ruff check src tests
 
 ### 1.0.0
 
-- First stable API. Add `MgIndiaClient.for_vehicle()` for several cars on one account, the `status_timeout` constructor keyword (status wait raised from 15 s to 45 s by default), and `Status.is_moving`.
+- First stable API. Add `MgIndiaClient.for_vehicle()` for several cars on one account, the `status_timeout` constructor keyword (wait for the status request raised from 15 s to 45 s by default; the charging frame wait stays at 15 s), and `Status.is_moving`.
 
 ### 0.3.2
 
