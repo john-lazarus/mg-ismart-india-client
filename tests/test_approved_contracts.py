@@ -113,6 +113,38 @@ def test_bounded_gateway_recovery_and_configured_vin(monkeypatch):
     asyncio.run(run())
 
 
+@pytest.mark.parametrize('codes, ok', [((2, 0), True), ((2, 2), False)])
+def test_gateway_relogin_when_session_taken_over(monkeypatch, codes, ok):
+    bodies = iter(codes)
+
+    class Response:
+        status, headers = 200, {}
+        async def text(self):
+            return json.dumps({'code': next(bodies), 'message': 'Login is invalid, please login again.'})
+        async def __aenter__(self):
+            return self
+        async def __aexit__(self, *args):
+            return False
+
+    class Session:
+        def get(self, *args, **kwargs):
+            return Response()
+
+    async def run():
+        client = MgIndiaClient(Session(), '0000000000', 'synthetic')
+        client.uid, client.token = 'U' * 50, 'T' * 40
+        client.login = AsyncMock()
+        monkeypatch.setattr('mg_ismart_india_client.client.decrypt_gateway_body', lambda text, headers: text)
+        if ok:
+            assert (await client.gateway_get('/synthetic'))['code'] == 0
+        else:
+            with pytest.raises(MgIndiaApiError, match='remains invalid'):
+                await client.gateway_get('/synthetic')
+        assert client.login.await_count == 1
+        assert next(bodies, None) is None
+    asyncio.run(run())
+
+
 @pytest.mark.parametrize('response', ['malformed', 'terminal-2', 'terminal-3', 'terminal-7', 'wrong-vin', 'wrong-type', 'no-cursor'])
 def test_ambiguous_command_never_replays(monkeypatch, response):
     async def run():

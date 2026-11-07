@@ -61,6 +61,8 @@ STATUS_DELAY = 1.5
 # the session is no longer valid and the caller must log in again.
 STATUS_RESULT_PENDING = (0, 4, 6)
 STATUS_RESULT_SESSION_INVALID = 2
+# 7: token expired; 2: another login took over the account (one session per account).
+GATEWAY_SESSION_INVALID_CODES = (2, 7)
 # The charge request answers result 5 when the server will not serve the charging
 # frame to this account -- observed live on a secondary (shared) account, whose
 # charging telemetry is gated server-side, while the owner account gets result 0
@@ -538,7 +540,7 @@ class MgIndiaClient:
                 )
             headers_out = response.headers
         parsed = json.loads(decrypt_gateway_body(text, headers_out))
-        if parsed.get("code") == 7:
+        if parsed.get("code") in GATEWAY_SESSION_INVALID_CODES:
             if not _session_retry:
                 raise MgIndiaApiError("Gateway session remains invalid after login")
             await self.login()

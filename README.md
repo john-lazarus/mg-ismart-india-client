@@ -58,6 +58,10 @@ ruff check src tests
 
 ## Release notes
 
+### 0.3.2
+
+- Re-login when the gateway reports the session was taken over by another login (code 2).
+
 ### 0.3.0
 
 - Add `Vehicle.is_electric`.
