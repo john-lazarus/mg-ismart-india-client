@@ -59,7 +59,7 @@ async with client.for_vehicle("SECONDVIN") as car:
     second = await car.status()
 ```
 
-Calls made outside `for_vehicle()` work exactly as before, for a single car set in the constructor.
+Calls made outside `for_vehicle()` work as before for a single car set in the constructor. Do not mix the two styles: `for_vehicle()` leaves the last car it used bound to the client.
 
 ## Waiting for a sleeping car
 
