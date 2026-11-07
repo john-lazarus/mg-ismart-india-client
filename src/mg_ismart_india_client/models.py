@@ -163,6 +163,17 @@ class Status:
     front_left_seat_heat_level: int | None = None
     front_right_seat_heat_level: int | None = None
 
+    @property
+    def is_moving(self) -> bool:
+        """True when the GPS has a usable fix and reports a speed above 0 km/h."""
+        gps = self.gps
+        return bool(
+            gps is not None
+            and gps.has_fix
+            and isinstance(gps.speed_kmh, (int, float))
+            and gps.speed_kmh > 0
+        )
+
 
 @dataclass(slots=True)
 class Snapshot:

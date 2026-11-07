@@ -4,6 +4,10 @@ Python client for the MG iSMART India TAP/gateway API.
 
 This package contains the protocol/client layer used by the MG iSMART India Home Assistant work. It is intentionally separate from Home Assistant so it can be tested and released independently.
 
+## Stability
+
+The package follows semantic versioning from 1.0.0: breaking changes come only in a new major version.
+
 ## Install
 
 ```bash
@@ -41,6 +45,36 @@ async with aiohttp.ClientSession() as session:
 
 Control methods require a configured PIN hash. The raw 4-digit control PIN is not stored by the client.
 
+## Several cars on one account
+
+MG India allows one session per account, so use one client per account. Run each car's calls inside `for_vehicle()`. It takes a lock on the client, binds that car's VIN, PIN hash and cached vehicle and capabilities, and saves them back when the block ends:
+
+```python
+client = MgIndiaClient(session, phone="9876543210", password="your-password")
+
+async with client.for_vehicle("FIRSTVIN", hash_control_pin("1234")) as car:
+    first = await car.status()
+
+async with client.for_vehicle("SECONDVIN") as car:
+    second = await car.status()
+```
+
+Calls made outside `for_vehicle()` work exactly as before, for a single car set in the constructor.
+
+## Waiting for a sleeping car
+
+`status()` polls until the car answers, for up to 30 x 1.5 s (45 s) per request. A parked car can take longer to wake than one that is awake. Pass `status_timeout` (seconds) to change the wait:
+
+```python
+client = MgIndiaClient(session, phone="9876543210", password="your-password", status_timeout=90)
+```
+
+It still returns as soon as the car answers.
+
+## Is the car moving?
+
+`Status.is_moving` is True only when the GPS has a usable fix and reports a speed above 0 km/h, and False otherwise (no GPS block, no fix, or no speed).
+
 ## Account notes
 
 - Multi-factor login (the SMS code) isn't supported yet. If it's switched on for the account, `login()` raises `MgIndiaMfaRequired`. Switching it off in the MG app's security settings lets the client log in.
@@ -57,6 +91,10 @@ ruff check src tests
 ```
 
 ## Release notes
+
+### 1.0.0
+
+- First stable API. Add `MgIndiaClient.for_vehicle()` for several cars on one account, the `status_timeout` constructor keyword (status wait raised from 15 s to 45 s by default), and `Status.is_moving`.
 
 ### 0.3.2
 

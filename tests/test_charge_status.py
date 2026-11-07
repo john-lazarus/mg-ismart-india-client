@@ -549,3 +549,35 @@ def test_encode_charge_status_request_is_message_id_8_with_empty_app():
     assert dispatcher["messageID"] == 8
     assert dispatcher.get("applicationDataLength", 0) == 0
     assert not app  # empty application payload
+
+
+@pytest.mark.parametrize(("status_timeout", "expected_posts"), [(None, 3), (6.0, 4)])
+def test_status_timeout_sets_the_poll_budget(monkeypatch, status_timeout, expected_posts):
+    # None reads the (patched) module constant; a timeout gives ceil(t / delay) posts
+    from mg_ismart_india_client import client as client_mod
+
+    monkeypatch.setattr(client_mod, "STATUS_ATTEMPTS", 3)
+    client = _client()
+    client.status_timeout = status_timeout
+    status_cursors, _charge_cursors, _logins = _patch_poll(
+        monkeypatch,
+        client,
+        status_frames=[({"result": 4, "eventID": 1}, None) for _ in range(10)],
+        charge_frames=[],
+    )
+    with pytest.raises(MgIndiaApiError, match="was not ready after polling"):
+        asyncio.run(client.status())
+    assert len(status_cursors) == expected_posts
+
+
+def test_status_timeout_still_returns_on_an_early_frame(monkeypatch):
+    client = MgIndiaClient(object(), "9876543210", "secret", vin="VIN12345678901234", status_timeout=45)
+    client.uid, client.token = "uid", "token"
+    status_cursors, _charge_cursors, _logins = _patch_poll(
+        monkeypatch,
+        client,
+        status_frames=[({"result": 0, "eventID": 1}, STATUS_SENTINEL)],
+        charge_frames=[],
+    )
+    assert asyncio.run(client.status()).status_time == STATUS_TIME
+    assert status_cursors == [0]

@@ -2,9 +2,11 @@ from __future__ import annotations
 
 import asyncio
 import json
+import math
 import re
 import time
-from collections.abc import Awaitable, Callable
+from collections.abc import AsyncIterator, Awaitable, Callable
+from contextlib import asynccontextmanager
 from dataclasses import replace
 from typing import Any
 from urllib.parse import urlencode
@@ -54,7 +56,8 @@ CONTROL_ATTEMPTS = 15
 CONTROL_DELAY = 2.0
 LOGIN_ATTEMPTS = 3
 LOGIN_DELAY = 1.5
-STATUS_ATTEMPTS = 10
+# 45 s is a starting value pending a measured wake time for parked petrol cars.
+STATUS_ATTEMPTS = 30
 STATUS_DELAY = 1.5
 # TAP dispatcher `result` codes on the status endpoint. 0 is success; 4 and 6 mean
 # the vehicle has not answered yet, so all three simply continue the poll. 2 means
@@ -428,7 +431,12 @@ def decode_login_response(raw: str) -> tuple[str, str]:
 
 
 class MgIndiaClient:
-    """Single-flight account client: callers must serialize operations and VIN changes."""
+    """Client for one MG India account (one login session, one or more cars).
+
+    For several cars, run each car's calls inside ``async with
+    client.for_vehicle(vin, pin_hash):``, which serializes them on the client.
+    Calls made outside it must be serialized by the caller, as before.
+    """
 
     def __init__(
         self,
@@ -437,6 +445,8 @@ class MgIndiaClient:
         password: str,
         vin: str | None = None,
         pin_hash: str | None = None,
+        *,
+        status_timeout: float | None = None,
     ) -> None:
         self.session = session
         self.phone = normalize_phone(phone)
@@ -448,7 +458,26 @@ class MgIndiaClient:
         self.token: str | None = None
         self.vehicle: Vehicle | None = None
         self.capabilities = Capabilities()
+        self.status_timeout = status_timeout
         self._event = 1
+        self._lock = asyncio.Lock()
+        self._per_vin: dict[str, tuple[Vehicle | None, Capabilities]] = {}
+
+    @asynccontextmanager
+    async def for_vehicle(
+        self, vin: str, pin_hash: str | None = None
+    ) -> AsyncIterator[MgIndiaClient]:
+        """Hold the client for one car: binds ``vin``/``pin_hash`` and that car's
+        cached ``vehicle``/``capabilities``, saving them back on exit."""
+        async with self._lock:
+            self.vin, self.pin_hash = vin, pin_hash
+            self.vehicle, self.capabilities = self._per_vin.get(
+                vin, (None, Capabilities())
+            )
+            try:
+                yield self
+            finally:
+                self._per_vin[vin] = (self.vehicle, self.capabilities)
 
     @property
     def has_pin(self) -> bool:
@@ -660,9 +689,14 @@ class MgIndiaClient:
         :raises ValueError: on malformed responses unless framing-error tolerance is
             enabled for this request.
         """
+        attempts = (
+            STATUS_ATTEMPTS
+            if self.status_timeout is None
+            else max(1, math.ceil(self.status_timeout / STATUS_DELAY))
+        )
         for login_attempt in range(2):
             event_id = 0
-            for attempt in range(STATUS_ATTEMPTS):
+            for attempt in range(attempts):
                 if self.vin != operation_vin:
                     raise MgIndiaApiError("VIN changed during polling")
                 text = await post(event_id, label)
@@ -676,7 +710,7 @@ class MgIndiaClient:
                     # An occasional malformed/empty framing (seen on a cold charge
                     # poll) is a transient blip, not a fault: keep polling within
                     # the budget rather than aborting the whole call.
-                    if attempt < STATUS_ATTEMPTS - 1:
+                    if attempt < attempts - 1:
                         await asyncio.sleep(STATUS_DELAY)
                     continue
                 if dispatcher.get("vin") not in (None, operation_vin):
@@ -695,7 +729,7 @@ class MgIndiaClient:
                 if frame is not None:
                     return frame
                 event_id = dispatcher.get("eventID", event_id)
-                if attempt < STATUS_ATTEMPTS - 1:
+                if attempt < attempts - 1:
                     await asyncio.sleep(STATUS_DELAY)
             else:
                 # Budget spent on a healthy session without the frame.

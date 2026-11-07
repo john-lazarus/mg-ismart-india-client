@@ -183,3 +183,40 @@ def test_control_methods_use_mg_india_parameter_shapes(monkeypatch):
         )
 
     asyncio.run(run())
+
+
+def test_for_vehicle_serializes_cars_and_keeps_per_vin_state():
+    from mg_ismart_india_client import Capabilities, Vehicle
+
+    async def run():
+        client = MgIndiaClient(object(), "9876543210", "secret")
+        events = []
+
+        async def use(vin, pin):
+            async with client.for_vehicle(vin, pin) as bound:
+                events.append(("in", vin))
+                await asyncio.sleep(0)
+                assert (bound.vin, bound.pin_hash, bound.vehicle) == (vin, pin, None)
+                bound.vehicle = Vehicle(vin, vin)
+                bound.capabilities = Capabilities(climate=vin == "VIN_A")
+                events.append(("out", vin))
+
+        await asyncio.gather(use("VIN_A", "A" * 32), use("VIN_B", None))
+        # the lock keeps one car's block from interleaving with the other's
+        assert events == [("in", "VIN_A"), ("out", "VIN_A"), ("in", "VIN_B"), ("out", "VIN_B")]
+
+        try:
+            async with client.for_vehicle("VIN_A") as bound:
+                assert bound.vehicle.vin == "VIN_A"
+                assert bound.capabilities.climate is True
+                bound.vehicle = Vehicle("VIN_A", "renamed")
+                raise RuntimeError("boom")
+        except RuntimeError:
+            pass
+
+        async with client.for_vehicle("VIN_A") as bound:
+            assert bound.vehicle.name == "renamed"
+        async with client.for_vehicle("VIN_B") as bound:
+            assert (bound.vehicle.vin, bound.capabilities.climate) == ("VIN_B", False)
+
+    asyncio.run(run())

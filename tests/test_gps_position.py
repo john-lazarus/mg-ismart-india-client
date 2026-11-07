@@ -7,6 +7,8 @@ owner's parking spot does not end up in the test suite, and speed is non-zero
 in the main sample because every captured frame so far is of a parked car.
 """
 
+import pytest
+
 from mg_ismart_india_client.client import parse_gps_position, parse_status
 from mg_ismart_india_client.models import GpsPosition, GpsStatus, Status
 from mg_ismart_india_client.tap import codec21
@@ -162,3 +164,17 @@ def test_status_carries_the_gps_position():
 
 def test_status_without_a_gps_block_leaves_gps_none():
     assert parse_status({"statusTime": 1, "basicVehicleStatus": {}}).gps is None
+
+
+@pytest.mark.parametrize(
+    ("gps", "moving"),
+    [
+        (None, False),
+        (GpsPosition(12.9, 77.5, speed_kmh=40.0, gps_status=GpsStatus.NO_SIGNAL), False),
+        (GpsPosition(12.9, 77.5, speed_kmh=0.0, gps_status=GpsStatus.FIX_3D), False),
+        (GpsPosition(12.9, 77.5, speed_kmh=None, gps_status=GpsStatus.FIX_3D), False),
+        (GpsPosition(12.9, 77.5, speed_kmh=0.5, gps_status=GpsStatus.FIX_2D), True),
+    ],
+)
+def test_status_is_moving(gps, moving):
+    assert Status(gps=gps).is_moving is moving
