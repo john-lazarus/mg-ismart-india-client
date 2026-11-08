@@ -71,6 +71,8 @@ client = MgIndiaClient(session, phone="9876543210", password="your-password", st
 
 It still returns as soon as the car answers. The charging frame (`status(include_charge=True)`, `charge_status()`) keeps its own 15 s wait, which `status_timeout` does not change.
 
+If the car does not answer within the wait, `status()` raises `MgIndiaVehicleUnreachable`, a subclass of `MgIndiaApiError`, so existing `except MgIndiaApiError` code keeps working.
+
 ## Is the car moving?
 
 `Status.is_moving` is True only when the GPS has a usable fix and reports a speed above 0 km/h, and False otherwise (no GPS block, no fix, or no speed).
@@ -91,6 +93,10 @@ ruff check src tests
 ```
 
 ## Release notes
+
+### 1.1.0
+
+- Add `MgIndiaVehicleUnreachable` (a subclass of `MgIndiaApiError`), raised by `status()` when the car does not answer within the status wait. The message is unchanged.
 
 ### 1.0.0
 

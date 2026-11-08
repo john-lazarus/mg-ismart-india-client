@@ -20,6 +20,7 @@ from mg_ismart_india_client import (
     ChargingStatusUnavailable,
     MgIndiaApiError,
     MgIndiaClient,
+    MgIndiaVehicleUnreachable,
     Status,
 )
 from mg_ismart_india_client.tap import (
@@ -519,6 +520,18 @@ def test_status_raises_when_status_never_arrives(monkeypatch):
             status_frames=[({"result": 4, "eventID": 1}, None) for _ in range(3)],
             charge_frames=[({"result": 4, "eventID": 1}, None) for _ in range(3)],
         )
+
+
+def test_status_never_arrives_raises_vehicle_unreachable(monkeypatch):
+    with pytest.raises(MgIndiaVehicleUnreachable) as exc:
+        _run_status(
+            monkeypatch,
+            status_frames=[({"result": 4, "eventID": 1}, None) for _ in range(3)],
+            charge_frames=[({"result": 4, "eventID": 1}, None) for _ in range(3)],
+        )
+
+    assert isinstance(exc.value, MgIndiaApiError)
+    assert str(exc.value) == "Vehicle status was not ready after polling"
 
 
 def test_status_without_charge_returns_on_the_status_frame(monkeypatch):

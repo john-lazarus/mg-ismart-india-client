@@ -334,6 +334,10 @@ class ChargingStatusUnavailable(MgIndiaApiError):
     """No charging frame was observed within the poll budget."""
 
 
+class MgIndiaVehicleUnreachable(MgIndiaApiError):
+    """The car did not answer the status request within the poll budget (asleep, or no signal)."""
+
+
 class MgIndiaCommandIndeterminate(MgIndiaApiError):
     """A command was sent, but its completion is unknown; do not replay it."""
 
@@ -826,7 +830,7 @@ class MgIndiaClient:
             need_status=True, need_charge=include_charge, label="Status"
         )
         if status_obj is None:
-            raise MgIndiaApiError("Vehicle status was not ready after polling")
+            raise MgIndiaVehicleUnreachable("Vehicle status was not ready after polling")
         if charge_obj is not None:
             status_obj = replace(status_obj, charge=charge_obj)
         return status_obj
