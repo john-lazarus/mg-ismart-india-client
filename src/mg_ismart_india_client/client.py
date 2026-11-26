@@ -465,10 +465,13 @@ class MgIndiaClient:
         self.token: str | None = None
         self.vehicle: Vehicle | None = None
         self.capabilities = Capabilities()
+        self.last_status: Status | None = None
         self.status_timeout = status_timeout
         self._event = 1
         self._lock = asyncio.Lock()
-        self._per_vin: dict[str, tuple[Vehicle | None, Capabilities]] = {}
+        self._per_vin: dict[
+            str, tuple[Vehicle | None, Capabilities, Status | None]
+        ] = {}
 
     @asynccontextmanager
     async def for_vehicle(
@@ -478,13 +481,13 @@ class MgIndiaClient:
         cached ``vehicle``/``capabilities``, saving them back on exit."""
         async with self._lock:
             self.vin, self.pin_hash = vin, pin_hash
-            self.vehicle, self.capabilities = self._per_vin.get(
-                vin, (None, Capabilities())
+            self.vehicle, self.capabilities, self.last_status = self._per_vin.get(
+                vin, (None, Capabilities(), None)
             )
             try:
                 yield self
             finally:
-                self._per_vin[vin] = (self.vehicle, self.capabilities)
+                self._per_vin[vin] = (self.vehicle, self.capabilities, self.last_status)
 
     @property
     def has_pin(self) -> bool:
@@ -833,6 +836,7 @@ class MgIndiaClient:
             raise MgIndiaVehicleUnreachable("Vehicle status was not ready after polling")
         if charge_obj is not None:
             status_obj = replace(status_obj, charge=charge_obj)
+        self.last_status = status_obj
         return status_obj
 
     async def charge_status(self) -> ChargeStatus:
@@ -1018,11 +1022,11 @@ class MgIndiaClient:
         operation_vin = self.vin
         try:
             await self._control("Door lock", 1 if lock else 2, params)
-        except MgIndiaApiError as err:
-            # MG India sometimes applies a lock/unlock command but never returns
-            # a terminal remote-command status. Treat it as success only when a
-            # fresh status read proves the target lock state was achieved.
-            if "did not complete" in str(err) and self.vin == operation_vin:
+        except MgIndiaCommandIndeterminate as err:
+            # The command may have been applied but its completion is unknown.
+            # Treat it as success only when a fresh status read proves the
+            # target lock state was achieved. Definitive failures are not caught.
+            if self.vin == operation_vin:
                 verification_started_at = time.time()
                 try:
                     status = await self.status()
@@ -1075,7 +1079,24 @@ class MgIndiaClient:
             ],
         )
 
-    async def control_heated_seats(self, driver: int, passenger: int) -> None:
+    async def control_heated_seats(
+        self, driver: int | None = None, passenger: int | None = None
+    ) -> None:
+        """Set seat heat levels (0..3). A seat left as None keeps the level in the
+        last status this client read. Param 17 is sent from ``front_left`` and 18
+        from ``front_right``; which physical seat 17 heats is not confirmed on a car.
+        """
+        if driver is None and passenger is None:
+            raise MgIndiaApiError("Give a driver or passenger heated-seat level")
+        last = self.last_status
+        if driver is None:
+            driver = last.front_left_seat_heat_level if last else None
+            if driver not in range(4):
+                raise MgIndiaApiError("Driver seat heat level is unknown; read status() first")
+        if passenger is None:
+            passenger = last.front_right_seat_heat_level if last else None
+            if passenger not in range(4):
+                raise MgIndiaApiError("Passenger seat heat level is unknown; read status() first")
         if driver not in range(4) or passenger not in range(4):
             raise MgIndiaApiError("Heated-seat levels must be between 0 and 3")
         await self._control(

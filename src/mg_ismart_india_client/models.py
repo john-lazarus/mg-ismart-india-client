@@ -313,6 +313,18 @@ class ChargeStatus:
     """
 
     @property
+    def estimated_completion_time(self) -> int | None:
+        """Unix epoch seconds when the charge in progress should finish, floored to
+        the whole minute; ``None`` if not charging or the time remaining is unknown.
+
+        Counted from when the frame was produced (:attr:`status_time`), not from
+        now, so it does not creep between polls; like the MG app's completion time.
+        """
+        if not self.is_charging or self.charge_time_remaining_min is None:
+            return None
+        return (self.status_time + self.charge_time_remaining_min * 60) // 60 * 60
+
+    @property
     def charging_power_kw(self) -> float:
         """Charging power, kilowatts: ``charging_voltage * charging_current / 1000``.
 

@@ -220,3 +220,85 @@ def test_for_vehicle_serializes_cars_and_keeps_per_vin_state():
             assert (bound.vehicle.vin, bound.capabilities.climate) == ("VIN_B", False)
 
     asyncio.run(run())
+
+
+def _client():
+    return MgIndiaClient(
+        _Session(), "9876543210", "secret", vin="VIN12345678901234", pin_hash="A" * 32
+    )
+
+
+def test_heated_seats_keep_the_other_seat(monkeypatch):
+    from mg_ismart_india_client import MgIndiaApiError, Status
+
+    async def run():
+        client = _client()
+        sent = []
+
+        async def fake_control(name, typ, params):
+            sent.append(params)
+
+        monkeypatch.setattr(client, "_control", fake_control)
+        try:
+            await client.control_heated_seats(driver=1)
+            raise AssertionError("expected MgIndiaApiError")
+        except MgIndiaApiError:
+            pass
+        assert sent == []
+
+        client.last_status = Status(front_left_seat_heat_level=2, front_right_seat_heat_level=1)
+        await client.control_heated_seats(passenger=3)
+        assert sent == [[(17, b"\x02"), (18, b"\x03"), (255, b"\x00")]]
+
+    asyncio.run(run())
+
+
+def test_door_lock_verifies_on_indeterminate_outcome(monkeypatch):
+    from types import SimpleNamespace
+
+    from mg_ismart_india_client import MgIndiaCommandIndeterminate, Status
+
+    async def run():
+        client = _client()
+
+        async def control(*args):
+            raise MgIndiaCommandIndeterminate("Door lock completion is unknown")
+
+        async def status():
+            return Status(status_time=1000, locked=True)
+
+        monkeypatch.setattr(client, "_control", control)
+        monkeypatch.setattr(client, "status", status)
+
+        def clock():
+            ticks = iter([999.5, 1001.0])  # verification start, then "now"
+            monkeypatch.setattr(
+                "mg_ismart_india_client.client.time", SimpleNamespace(time=lambda: next(ticks))
+            )
+
+        clock()
+        await client.control_door_lock(True)  # fresh status shows locked: success
+        clock()
+        try:
+            await client.control_door_lock(False)  # fresh status shows locked: not proven
+            raise AssertionError("expected MgIndiaCommandIndeterminate")
+        except MgIndiaCommandIndeterminate:
+            pass
+
+    asyncio.run(run())
+
+
+def test_estimated_completion_time():
+    from dataclasses import fields
+
+    from mg_ismart_india_client import ChargeStatus
+
+    def make(charging):
+        kw = {f.name: None for f in fields(ChargeStatus) if f.init and f.name != "_raw"}
+        kw.update(
+            is_charging=charging, status_time=1_800_000_030, charge_time_remaining_min=90
+        )
+        return ChargeStatus(**kw)
+
+    assert make(True).estimated_completion_time == 1_800_005_400
+    assert make(False).estimated_completion_time is None

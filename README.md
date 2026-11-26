@@ -43,6 +43,8 @@ async with aiohttp.ClientSession() as session:
     print(status.charge)
 ```
 
+`control_heated_seats(passenger=3)` changes one seat and keeps the other at the level in the last status this client read.
+
 Control methods require a configured PIN hash. The raw 4-digit control PIN is not stored by the client.
 
 ## Several cars on one account
@@ -93,6 +95,12 @@ ruff check src tests
 ```
 
 ## Release notes
+
+### 1.2.0
+
+- `control_heated_seats()` takes optional `driver` and `passenger`; a seat left out keeps the level from the last status read.
+- `control_door_lock()` checks the status after any unknown outcome, not only "did not complete".
+- Add `ChargeStatus.estimated_completion_time`.
 
 ### 1.1.0
 
